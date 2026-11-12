@@ -8,6 +8,11 @@ scripts/watch-and-deploy-runpod.ps1
 secrets/*
 !secrets/.gitkeep
 
+# Windows local-agent pairing (also lives under %APPDATA% outside the repo)
+local-agent/.venv/
+local-agent/**/pair.env
+**/jarvis-local-agent/pair.env
+
 *.gguf
 *.part
 *.pem
