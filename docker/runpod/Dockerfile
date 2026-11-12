@@ -75,11 +75,13 @@ RUN python3 -m venv /opt/jarvis-tools \
         --requirement /tmp/tools-requirements.txt \
     && rm /tmp/tools-requirements.txt
 
-COPY tools/app.py tools/scan_host_key.py /opt/jarvis-tools-app/
+COPY tools/app.py tools/scan_host_key.py tools/local_agent_bridge.py /opt/jarvis-tools-app/
 COPY docker/runpod/defaults/ssh-targets.yaml docker/runpod/defaults/ssh_known_hosts /opt/jarvis-defaults/
+COPY web/jarvis-orb /opt/jarvis-defaults/jarvis-orb
 RUN /opt/jarvis-tools/bin/python -m py_compile \
         /opt/jarvis-tools-app/app.py \
         /opt/jarvis-tools-app/scan_host_key.py \
+        /opt/jarvis-tools-app/local_agent_bridge.py \
     && rm -rf /opt/jarvis-tools-app/__pycache__
 COPY --chmod=0755 docker/llama/download-model.sh /usr/local/bin/download-model.sh
 COPY --chmod=0755 docker/llama/entrypoint.sh /usr/local/bin/llama-entrypoint.sh
@@ -87,6 +89,7 @@ COPY --chmod=0755 docker/runpod/entrypoint.sh /usr/local/bin/runpod-entrypoint.s
 COPY --chmod=0755 docker/runpod/tailscale-up.sh /usr/local/bin/tailscale-up.sh
 COPY --chmod=0755 docker/runpod/healthcheck.sh /usr/local/bin/jarvis-healthcheck.sh
 COPY --chmod=0755 docker/runpod/scan-host-key.sh /usr/local/bin/scan-host-key-runpod
+COPY --chmod=0755 docker/runpod/stats-publisher.sh /usr/local/bin/jarvis-stats-publisher.sh
 COPY docker/runpod/supervisord.conf /etc/supervisor/conf.d/jarvis.conf
 RUN for script in \
         /usr/local/bin/download-model.sh \
@@ -94,7 +97,8 @@ RUN for script in \
         /usr/local/bin/runpod-entrypoint.sh \
         /usr/local/bin/tailscale-up.sh \
         /usr/local/bin/jarvis-healthcheck.sh \
-        /usr/local/bin/scan-host-key-runpod; \
+        /usr/local/bin/scan-host-key-runpod \
+        /usr/local/bin/jarvis-stats-publisher.sh; \
     do sh -n "${script}"; done
 
 RUN mkdir -p \
