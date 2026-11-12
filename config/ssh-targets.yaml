@@ -6,6 +6,9 @@
 #     host: core-router.example-tailnet.ts.net
 #     user: jarvis-audit
 #     port: 22
+#     # route: pod (default) uses Tailscale SOCKS from the cloud tool service.
+#     # route: local executes via the Windows local agent (LAN-transparent).
+#     route: pod
 #     description: Read-only checks on the core router
 #     identity_file: /run/secrets/ssh/id_ed25519
 #     connect_timeout: 15
@@ -32,5 +35,14 @@
 # 2. allow_mutating is true for this target; and
 # 3. SSH_ENABLE_MUTATING_COMMANDS=true is set in .env.
 # Keep the default read-only unless an operational workflow truly requires more.
+#
+# LAN example (requires the Windows local agent — see docs/local-agent.md):
+#   home-nas:
+#     host: 192.168.1.50
+#     user: jarvis
+#     route: local
+#     description: Home NAS via Windows local agent
+#     allowed_commands:
+#       - '^(hostname|uptime|whoami)$'
 
 targets: {}
