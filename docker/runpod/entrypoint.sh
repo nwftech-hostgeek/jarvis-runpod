@@ -186,6 +186,24 @@ export SSH_PRIVATE_KEY_PATH=/run/secrets/ssh/id_ed25519
 export SSH_TARGETS_FILE=/run/jarvis-config/ssh-targets.yaml
 export SSH_KNOWN_HOSTS_FILE=/run/jarvis-config/ssh_known_hosts
 
+# Local-agent dial-in: bind tools on all interfaces only when explicitly enabled
+# for RunPod HTTP proxy port 8090. Default remains loopback-only.
+export LOCAL_AGENT_ENABLED=${LOCAL_AGENT_ENABLED:-true}
+case "${LOCAL_AGENT_LISTEN:-}" in
+    0.0.0.0|127.0.0.1) ;;
+    "")
+        if [ "${LOCAL_AGENT_ENABLED}" = "true" ] && [ -n "${JARVIS_LOCAL_AGENT_TOKEN:-}" ]; then
+            export LOCAL_AGENT_LISTEN=0.0.0.0
+        else
+            export LOCAL_AGENT_LISTEN=127.0.0.1
+        fi
+        ;;
+    *)
+        printf 'LOCAL_AGENT_LISTEN must be 127.0.0.1 or 0.0.0.0\n' >&2
+        exit 1
+        ;;
+esac
+
 if [ ! -f "${config_root}/ssh-targets.yaml" ]; then
     cp /opt/jarvis-defaults/ssh-targets.yaml "${config_root}/ssh-targets.yaml"
     try_chown jarvis:jarvis "${config_root}/ssh-targets.yaml"
@@ -230,6 +248,22 @@ try_chown -h jarvis:jarvis \
     /run/jarvis-config/ssh-targets.yaml \
     /run/jarvis-config/ssh_known_hosts
 
+# Optional hot-patch: copy Python tool modules from the Network Volume over the
+# image copies so local-agent bridge fixes can ship without a full image rebuild.
+tools_override="${config_root}/jarvis-tools-app"
+if [ -d "${tools_override}" ]; then
+    for module in app.py local_agent_bridge.py scan_host_key.py; do
+        if [ -f "${tools_override}/${module}" ]; then
+            cp -f "${tools_override}/${module}" "/opt/jarvis-tools-app/${module}"
+            try_chown jarvis:jarvis "/opt/jarvis-tools-app/${module}"
+        fi
+    done
+    if [ -f "${tools_override}/requirements.overlay.txt" ]; then
+        /opt/jarvis-tools/bin/pip install --no-cache-dir \
+            --requirement "${tools_override}/requirements.overlay.txt" || true
+    fi
+fi
+
 # Install the Jarvis orb / wake companion into Open WebUI's frontend+static trees
 # so it is reachable at /jarvis-orb/ without forking Open WebUI.
 orb_src=""
@@ -241,11 +275,32 @@ elif [ -d /opt/jarvis-defaults/jarvis-orb ]; then
     cp -a /opt/jarvis-defaults/jarvis-orb/. "${data_root}/jarvis-orb/"
     try_chown -R jarvis:jarvis "${data_root}/jarvis-orb"
 fi
+
+# Authoritative process-start clock stamp for LIVE_DATETIME (secondary to
+# per-request injection in the orb). No secrets.
+mkdir -p "${data_root}/jarvis-orb"
+boot_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+boot_weekday=$(date -u +"%A")
+printf '%s\n' "{
+  \"process_started_at_utc\": \"${boot_utc}\",
+  \"weekday_utc\": \"${boot_weekday}\",
+  \"timezone\": \"UTC\",
+  \"preferred_local_timezone\": \"America/New_York\",
+  \"note\": \"Container/process start stamp. Prefer fresh LIVE_DATETIME at each chat request.\"
+}" > "${data_root}/jarvis-orb/boot-datetime.json"
+try_chown jarvis:jarvis "${data_root}/jarvis-orb/boot-datetime.json"
+
+# Prefer the volume tree once boot-datetime.json exists alongside index.html.
+if [ -f "${data_root}/jarvis-orb/index.html" ]; then
+    orb_src="${data_root}/jarvis-orb"
+fi
+
 if [ -n "${orb_src}" ]; then
     ow_root="$(/opt/open-webui/bin/python -c 'import open_webui, os; print(os.path.dirname(open_webui.__file__))')"
     for dest in "${ow_root}/frontend/jarvis-orb" "${ow_root}/static/jarvis-orb"; do
         mkdir -p "${dest}/assets"
         cp -a "${orb_src}/." "${dest}/"
+        cp -f "${data_root}/jarvis-orb/boot-datetime.json" "${dest}/boot-datetime.json" 2>/dev/null || true
         try_chown -R jarvis:jarvis "${dest}"
     done
     # Default authenticated home is the always-listen orb. Chat stays at /?chat=1.
