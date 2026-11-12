@@ -71,8 +71,8 @@ services:
     restart: unless-stopped
     environment:
       API_KEY: ${VOICE_API_KEY:?Set VOICE_API_KEY in .env}
-      PRELOAD_MODELS: ${VOICE_PRELOAD_MODELS:-["Systran/faster-whisper-small","speaches-ai/Kokoro-82M-v1.0-ONNX"]}
-      WHISPER__MODEL: ${STT_MODEL:-Systran/faster-whisper-small}
+      PRELOAD_MODELS: ${VOICE_PRELOAD_MODELS:-["Systran/faster-whisper-medium","speaches-ai/Kokoro-82M-v1.0-ONNX"]}
+      WHISPER__MODEL: ${STT_MODEL:-Systran/faster-whisper-medium}
       WHISPER__INFERENCE_DEVICE: ${WHISPER_DEVICE:-cpu}
       WHISPER__COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
       UNSTABLE_ORT_OPTS__EXCLUDE_PROVIDERS: ${ORT_EXCLUDE_PROVIDERS:-["TensorrtExecutionProvider","CUDAExecutionProvider"]}
@@ -162,6 +162,8 @@ services:
       SSH_ENABLE_MUTATING_COMMANDS: ${SSH_ENABLE_MUTATING_COMMANDS:-false}
       SSH_DEFAULT_TIMEOUT: ${SSH_DEFAULT_TIMEOUT:-30}
       SSH_MAX_OUTPUT_BYTES: ${SSH_MAX_OUTPUT_BYTES:-262144}
+      LOCAL_AGENT_ENABLED: ${LOCAL_AGENT_ENABLED:-true}
+      JARVIS_LOCAL_AGENT_TOKEN: ${JARVIS_LOCAL_AGENT_TOKEN:-}
     volumes:
       - type: bind
         source: ${SSH_TARGETS_FILE:-./config/ssh-targets.yaml}
@@ -223,12 +225,12 @@ services:
       AUDIO_STT_ENGINE: openai
       AUDIO_STT_OPENAI_API_BASE_URL: http://voice:8000/v1
       AUDIO_STT_OPENAI_API_KEY: ${VOICE_API_KEY:?Set VOICE_API_KEY in .env}
-      AUDIO_STT_MODEL: ${STT_MODEL:-Systran/faster-whisper-small}
+      AUDIO_STT_MODEL: ${STT_MODEL:-Systran/faster-whisper-medium}
       AUDIO_TTS_ENGINE: openai
       AUDIO_TTS_OPENAI_API_BASE_URL: http://voice:8000/v1
       AUDIO_TTS_OPENAI_API_KEY: ${VOICE_API_KEY:?Set VOICE_API_KEY in .env}
       AUDIO_TTS_MODEL: ${TTS_MODEL:-speaches-ai/Kokoro-82M-v1.0-ONNX}
-      AUDIO_TTS_VOICE: ${TTS_VOICE:-af_heart}
+      AUDIO_TTS_VOICE: ${TTS_VOICE:-bm_george}
       AUDIO_TTS_SPLIT_ON: punctuation
       RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       WEBUI_URL: ${WEBUI_URL:-}
