@@ -16,9 +16,9 @@ COPY tools/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --requirement /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
-COPY --chown=jarvis-tools:jarvis-tools tools/app.py tools/scan_host_key.py /app/
+COPY --chown=jarvis-tools:jarvis-tools tools/app.py tools/scan_host_key.py tools/local_agent_bridge.py /app/
 COPY --chmod=0755 docker/tools/entrypoint.sh /usr/local/bin/tools-entrypoint.sh
-RUN python -m py_compile /app/app.py /app/scan_host_key.py \
+RUN python -m py_compile /app/app.py /app/scan_host_key.py /app/local_agent_bridge.py \
     && rm -rf /app/__pycache__ \
     && sh -n /usr/local/bin/tools-entrypoint.sh \
     && mkdir -p /run/secrets/ssh /run/secrets-src/ssh \
@@ -45,7 +45,16 @@ operation_ids = {
     for path in app.openapi()["paths"].values()
     for operation in path.values()
 }
-assert {"list_ssh_targets", "run_ssh_command"} <= operation_ids
+assert {
+    "list_ssh_targets",
+    "run_ssh_command",
+    "get_weather",
+    "http_get_allowlisted",
+    "local_agent_status",
+    "local_ping",
+    "local_resolve",
+    "local_run",
+} <= operation_ids
 PY
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
