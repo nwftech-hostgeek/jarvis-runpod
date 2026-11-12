@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 import re
@@ -8,17 +9,26 @@ import shlex
 import socket
 import time
 import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Annotated
+from typing import Any, Annotated, Literal
 
 import paramiko
 import yaml
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
+from local_agent_bridge import (
+    LOCAL_AGENT_ENABLED,
+    hub as local_agent_hub,
+    run_agent_socket,
+    token_configured as local_agent_token_configured,
+)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -41,6 +51,18 @@ ENABLE_MUTATING_COMMANDS = (
     os.getenv("SSH_ENABLE_MUTATING_COMMANDS", "false").lower() == "true"
 )
 TOOL_API_KEY = os.getenv("TOOL_API_KEY", "")
+HTTP_FETCH_TIMEOUT = float(os.getenv("HTTP_FETCH_TIMEOUT", "8"))
+HTTP_FETCH_MAX_BYTES = int(os.getenv("HTTP_FETCH_MAX_BYTES", "65536"))
+WEATHER_TIMEOUT = float(os.getenv("WEATHER_TIMEOUT", "8"))
+
+# Strict host allowlist for outbound public-info HTTPS GET. No secrets required.
+ALLOWED_HTTP_HOSTS = frozenset(
+    {
+        "api.open-meteo.com",
+        "geocoding-api.open-meteo.com",
+        "wttr.in",
+    }
+)
 
 SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
 SAFE_USER_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,63}$")
@@ -54,6 +76,37 @@ MUTATING_COMMAND_RE = re.compile(
     r"\bsystemctl\s+(start|stop|restart|reload|enable|disable|mask|unmask)\b",
     re.IGNORECASE,
 )
+
+WMO_WEATHER_CODES = {
+    0: "clear",
+    1: "mainly clear",
+    2: "partly cloudy",
+    3: "overcast",
+    45: "fog",
+    48: "depositing rime fog",
+    51: "light drizzle",
+    53: "drizzle",
+    55: "dense drizzle",
+    56: "light freezing drizzle",
+    57: "freezing drizzle",
+    61: "slight rain",
+    63: "rain",
+    65: "heavy rain",
+    66: "light freezing rain",
+    67: "freezing rain",
+    71: "slight snow",
+    73: "snow",
+    75: "heavy snow",
+    77: "snow grains",
+    80: "slight rain showers",
+    81: "rain showers",
+    82: "violent rain showers",
+    85: "slight snow showers",
+    86: "heavy snow showers",
+    95: "thunderstorm",
+    96: "thunderstorm with slight hail",
+    99: "thunderstorm with heavy hail",
+}
 
 
 class TargetConfig(BaseModel):
@@ -70,6 +123,9 @@ class TargetConfig(BaseModel):
     connect_timeout: int = Field(default=15, ge=1, le=60)
     command_timeout: int = Field(default=30, ge=1, le=300)
     allow_mutating: bool = False
+    # pod = Tailscale SOCKS from the cloud tool service.
+    # local = Windows local-agent companion (LAN-transparent SSH).
+    route: Literal["pod", "local"] = "pod"
 
     @field_validator("host")
     @classmethod
@@ -119,6 +175,8 @@ class TargetSummary(BaseModel):
     description: str
     examples: list[str]
     mutating_commands_enabled: bool
+    route: Literal["pod", "local"] = "pod"
+    available: bool = True
 
 
 class ExecuteRequest(BaseModel):
@@ -147,8 +205,120 @@ class ExecuteResponse(BaseModel):
     output_truncated: bool
 
 
+class WeatherRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    location: str = Field(
+        min_length=1,
+        max_length=120,
+        description="City, region, or place name to look up (Open-Meteo geocoding).",
+    )
+    units: Literal["fahrenheit", "celsius"] = Field(
+        default="fahrenheit",
+        description="Temperature units for the summary.",
+    )
+
+
+class WeatherResponse(BaseModel):
+    location: str
+    latitude: float
+    longitude: float
+    timezone: str
+    units: str
+    temperature: float
+    feels_like: float | None = None
+    humidity_pct: float | None = None
+    wind_speed: float | None = None
+    wind_units: str | None = None
+    conditions: str
+    weather_code: int | None = None
+    observed_at: str | None = None
+    source: str = "open-meteo"
+
+
+class HttpGetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(
+        min_length=8,
+        max_length=2000,
+        description=(
+            "HTTPS URL on an allowlisted public-info host "
+            "(api.open-meteo.com, geocoding-api.open-meteo.com, wttr.in)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_allowlisted_url(self) -> HttpGetRequest:
+        parsed = urllib.parse.urlparse(self.url)
+        if parsed.scheme != "https":
+            raise ValueError("only https URLs are allowed")
+        if parsed.username or parsed.password:
+            raise ValueError("URLs must not contain credentials")
+        host = (parsed.hostname or "").lower()
+        if host not in ALLOWED_HTTP_HOSTS:
+            raise ValueError(
+                "host is not on the public-info allowlist: "
+                + ", ".join(sorted(ALLOWED_HTTP_HOSTS))
+            )
+        if parsed.port not in (None, 443):
+            raise ValueError("only default HTTPS port 443 is allowed")
+        return self
+
+
+class HttpGetResponse(BaseModel):
+    url: str
+    status_code: int
+    content_type: str | None = None
+    body: str
+    truncated: bool
+    bytes_read: int
+
+
+class LocalPingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = Field(min_length=1, max_length=255)
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        if not SAFE_HOST_RE.fullmatch(value):
+            raise ValueError("must be a DNS name or unbracketed IP address")
+        return value
+
+
+class LocalResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not SAFE_HOST_RE.fullmatch(value):
+            raise ValueError("must be a DNS name or unbracketed IP address")
+        return value
+
+
+class LocalRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    command: str = Field(
+        min_length=1,
+        max_length=500,
+        description="Allowlisted local companion command (requires confirmation).",
+    )
+
+
 class CommandTimedOut(Exception):
     pass
+
+
+class ExternalFetchError(Exception):
+    def __init__(self, message: str, *, status_code: int = 502) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def load_targets() -> dict[str, TargetConfig]:
@@ -358,15 +528,366 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="Jarvis Allowlisted SSH Tools",
-    version="1.0.0",
+    title="Jarvis Allowlisted Tools",
+    version="1.2.0",
     description=(
-        "Executes administrator-approved SSH commands on named Tailnet targets. "
-        "Targets, host keys, identities, and full-command regular expressions "
-        "are configured by the operator; arbitrary hosts are never accepted."
+        "Allowlisted SSH on named Tailnet or Windows local-agent targets, plus "
+        "public-info HTTPS helpers (Open-Meteo weather and a strict host "
+        "allowlist). Arbitrary hosts are never accepted. Weather/public-info "
+        "tools do not require user confirmation; SSH and local_run still should."
     ),
     lifespan=lifespan,
 )
+
+
+def _require_local_agent() -> None:
+    if not LOCAL_AGENT_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Local agent support is disabled on this deployment.",
+        )
+    if not local_agent_token_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="JARVIS_LOCAL_AGENT_TOKEN is not configured.",
+        )
+    if not local_agent_hub.connected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Local agent is not connected.",
+        )
+
+
+async def execute_via_local_agent(
+    *,
+    target_name: str,
+    target: TargetConfig,
+    command: str,
+    timeout_seconds: int,
+) -> tuple[int, str, str, bool]:
+    result = await local_agent_hub.rpc(
+        "ssh_execute",
+        {
+            "target": target_name,
+            "host": target.host,
+            "user": target.user,
+            "port": target.port,
+            "command": command,
+            "timeout_seconds": timeout_seconds,
+            "connect_timeout": target.connect_timeout,
+            "require_confirm": bool(
+                ENABLE_MUTATING_COMMANDS and target.allow_mutating
+            ),
+        },
+        timeout=float(timeout_seconds + target.connect_timeout + 30),
+    )
+    return (
+        int(result.get("exit_status", 1)),
+        str(result.get("stdout", "")),
+        str(result.get("stderr", "")),
+        bool(result.get("output_truncated", False)),
+    )
+
+
+def target_from_agent_advertisement(name: str) -> TargetConfig | None:
+    for item in local_agent_hub.advertised_targets():
+        if item.get("name") != name:
+            continue
+        try:
+            return TargetConfig.model_validate(
+                {
+                    "host": item.get("host"),
+                    "user": item.get("user", "jarvis"),
+                    "port": item.get("port", 22),
+                    "description": item.get("description", ""),
+                    "allowed_commands": item.get("allowed_commands") or [],
+                    "mutating_commands": item.get("mutating_commands") or [],
+                    "examples": item.get("examples") or [],
+                    "connect_timeout": item.get("connect_timeout", 15),
+                    "command_timeout": item.get("command_timeout", 30),
+                    "allow_mutating": bool(item.get("allow_mutating", False)),
+                    "route": "local",
+                    "identity_file": None,
+                }
+            )
+        except ValidationError:
+            logger.warning("local_agent_bad_target name=%s", name)
+            return None
+    return None
+
+
+def _http_get_bytes(
+    url: str,
+    *,
+    timeout: float,
+    max_bytes: int,
+    accept: str = "application/json,text/plain,*/*;q=0.1",
+) -> tuple[int, str | None, bytes, bool]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise ExternalFetchError("only https URLs are allowed", status_code=400)
+    host = (parsed.hostname or "").lower()
+    if host not in ALLOWED_HTTP_HOSTS:
+        raise ExternalFetchError("host is not allowlisted", status_code=403)
+    if parsed.username or parsed.password:
+        raise ExternalFetchError("URLs must not contain credentials", status_code=400)
+    if parsed.port not in (None, 443):
+        raise ExternalFetchError("only HTTPS port 443 is allowed", status_code=400)
+
+    request = urllib.request.Request(
+        url,
+        method="GET",
+        headers={
+            "Accept": accept,
+            "User-Agent": "jarvis-tools/1.1 (+allowlisted-public-info)",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status_code = int(response.status)
+            content_type = response.headers.get("Content-Type")
+            chunks = bytearray()
+            truncated = False
+            while True:
+                piece = response.read(4096)
+                if not piece:
+                    break
+                remaining = max_bytes - len(chunks)
+                if remaining <= 0:
+                    truncated = True
+                    break
+                if len(piece) > remaining:
+                    chunks.extend(piece[:remaining])
+                    truncated = True
+                    break
+                chunks.extend(piece)
+            return status_code, content_type, bytes(chunks), truncated
+    except urllib.error.HTTPError as exc:
+        body = exc.read(max_bytes)
+        return int(exc.code), exc.headers.get("Content-Type"), body, False
+    except TimeoutError as exc:
+        raise ExternalFetchError("upstream request timed out", status_code=504) from exc
+    except urllib.error.URLError as exc:
+        raise ExternalFetchError(
+            f"upstream request failed: {exc.reason}",
+            status_code=502,
+        ) from exc
+
+
+def _decode_body(raw: bytes) -> str:
+    return raw.decode("utf-8", errors="replace")
+
+
+def _load_json_object(raw: bytes, *, label: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(_decode_body(raw))
+    except json.JSONDecodeError as exc:
+        raise ExternalFetchError(f"{label} returned invalid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ExternalFetchError(f"{label} returned unexpected JSON shape")
+    return parsed
+
+
+def fetch_weather(location: str, units: str) -> WeatherResponse:
+    query = urllib.parse.urlencode(
+        {
+            "name": location.strip(),
+            "count": 1,
+            "language": "en",
+            "format": "json",
+        }
+    )
+    geo_url = f"https://geocoding-api.open-meteo.com/v1/search?{query}"
+    geo_status, _, geo_raw, _ = _http_get_bytes(
+        geo_url,
+        timeout=WEATHER_TIMEOUT,
+        max_bytes=HTTP_FETCH_MAX_BYTES,
+    )
+    if geo_status >= 400:
+        raise ExternalFetchError(
+            f"geocoding failed with HTTP {geo_status}",
+            status_code=502,
+        )
+    geo = _load_json_object(geo_raw, label="geocoding")
+    results = geo.get("results") or []
+    if not results:
+        raise ExternalFetchError(
+            f"no geocoding match for location: {location.strip()}",
+            status_code=404,
+        )
+    place = results[0]
+    latitude = float(place["latitude"])
+    longitude = float(place["longitude"])
+    place_name = str(place.get("name") or location.strip())
+    admin = place.get("admin1")
+    country = place.get("country_code") or place.get("country")
+    bits = [place_name]
+    if admin:
+        bits.append(str(admin))
+    if country:
+        bits.append(str(country))
+    display = ", ".join(bits)
+
+    temp_unit = "fahrenheit" if units == "fahrenheit" else "celsius"
+    wind_unit = "mph" if units == "fahrenheit" else "kmh"
+    forecast_query = urllib.parse.urlencode(
+        {
+            "latitude": f"{latitude:.5f}",
+            "longitude": f"{longitude:.5f}",
+            "current": (
+                "temperature_2m,relative_humidity_2m,apparent_temperature,"
+                "weather_code,wind_speed_10m"
+            ),
+            "temperature_unit": temp_unit,
+            "wind_speed_unit": wind_unit,
+            "timezone": "auto",
+        }
+    )
+    forecast_url = f"https://api.open-meteo.com/v1/forecast?{forecast_query}"
+    forecast_status, _, forecast_raw, _ = _http_get_bytes(
+        forecast_url,
+        timeout=WEATHER_TIMEOUT,
+        max_bytes=HTTP_FETCH_MAX_BYTES,
+    )
+    if forecast_status >= 400:
+        raise ExternalFetchError(
+            f"forecast failed with HTTP {forecast_status}",
+            status_code=502,
+        )
+    forecast = _load_json_object(forecast_raw, label="forecast")
+    current = forecast.get("current") or {}
+    if not isinstance(current, dict) or "temperature_2m" not in current:
+        raise ExternalFetchError("forecast response missing current conditions")
+
+    code = current.get("weather_code")
+    try:
+        weather_code = int(code) if code is not None else None
+    except (TypeError, ValueError):
+        weather_code = None
+    conditions = (
+        WMO_WEATHER_CODES.get(weather_code, f"code {weather_code}")
+        if weather_code is not None
+        else "unknown"
+    )
+
+    def _maybe_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    return WeatherResponse(
+        location=display,
+        latitude=latitude,
+        longitude=longitude,
+        timezone=str(forecast.get("timezone") or place.get("timezone") or "UTC"),
+        units=temp_unit,
+        temperature=float(current["temperature_2m"]),
+        feels_like=_maybe_float(current.get("apparent_temperature")),
+        humidity_pct=_maybe_float(current.get("relative_humidity_2m")),
+        wind_speed=_maybe_float(current.get("wind_speed_10m")),
+        wind_units=wind_unit,
+        conditions=conditions,
+        weather_code=weather_code,
+        observed_at=str(current.get("time")) if current.get("time") else None,
+    )
+
+
+def _probe_http(url: str, timeout: float = 1.0) -> str:
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return "ok" if 200 <= int(response.status) < 300 else "down"
+    except Exception:
+        return "down"
+
+
+def collect_host_stats() -> dict[str, Any]:
+    """Sanitized host telemetry for the orb HUD. Never includes secrets."""
+    mem: dict[str, Any] = {"total_mb": 0, "used_mb": 0, "used_pct": 0.0}
+    try:
+        info = {
+            line.split(":")[0]: int(line.split()[1])
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
+            if ":" in line
+        }
+        total = info.get("MemTotal", 0)
+        avail = info.get("MemAvailable", 0)
+        used = max(total - avail, 0)
+        if total:
+            mem = {
+                "total_mb": round(total / 1024),
+                "used_mb": round(used / 1024),
+                "used_pct": round((used * 100) / total, 1),
+            }
+    except OSError:
+        pass
+
+    cpu: dict[str, Any] = {"load1": 0.0, "cpus": 1, "approx_pct": 0.0}
+    try:
+        load1 = float(Path("/proc/loadavg").read_text(encoding="utf-8").split()[0])
+        cpus = os.cpu_count() or 1
+        cpu = {
+            "load1": load1,
+            "cpus": cpus,
+            "approx_pct": round(min(100.0, (load1 / cpus) * 100), 1),
+        }
+    except OSError:
+        pass
+
+    gpu: dict[str, Any] = {"available": False}
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        line = (proc.stdout or "").strip().splitlines()[:1]
+        if line:
+            parts = [p.strip() for p in line[0].split(",")]
+            if len(parts) >= 5:
+                gpu = {
+                    "available": True,
+                    "util_pct": float(parts[0] or 0),
+                    "mem_util_pct": float(parts[1] or 0),
+                    "vram_used_mb": float(parts[2] or 0),
+                    "vram_total_mb": float(parts[3] or 0),
+                    "temp_c": float(parts[4] or 0),
+                }
+    except Exception:
+        pass
+
+    uptime_sec = 0
+    try:
+        uptime_sec = int(float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0]))
+    except OSError:
+        pass
+
+    ui_port = os.getenv("RUNPOD_UI_PORT", "3000")
+    return {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "uptime_sec": uptime_sec,
+        "services": {
+            "open_webui": _probe_http(f"http://127.0.0.1:{ui_port}/health"),
+            "llama": _probe_http("http://127.0.0.1:8080/health"),
+            "voice": _probe_http("http://127.0.0.1:8000/health"),
+            "tools": "ok",
+        },
+        "cpu": cpu,
+        "memory": mem,
+        "gpu": gpu,
+    }
 
 
 @app.get("/health", include_in_schema=False)
@@ -392,12 +913,102 @@ def health() -> dict[str, Any]:
     except OSError:
         pass
 
+    checks["local_agent_token"] = local_agent_token_configured()
+    checks["local_agent_connected"] = local_agent_hub.connected
     required = checks["api_key"] and checks["config"] and checks["known_hosts"]
     return {
         "status": "ok" if required else "degraded",
         "checks": checks,
         "target_count": target_count,
+        "local_agent": local_agent_hub.status(),
     }
+
+
+@app.get(
+    "/v1/stats",
+    operation_id="host_stats",
+    dependencies=[Depends(authorize)],
+    summary="Sanitized host telemetry for Jarvis HUD",
+)
+def host_stats() -> dict[str, Any]:
+    """Return CPU/GPU/memory/service health without secrets or identities."""
+    payload = collect_host_stats()
+    payload["local_agent"] = {
+        "connected": local_agent_hub.connected,
+        "agent_id": local_agent_hub.status().get("agent_id"),
+    }
+    return payload
+
+
+@app.get(
+    "/v1/local-agent/status",
+    operation_id="local_agent_status",
+    dependencies=[Depends(authorize)],
+    summary="Windows local-agent connection status",
+)
+def local_agent_status() -> dict[str, Any]:
+    """Report whether the LAN companion is online (no secrets)."""
+    return local_agent_hub.status()
+
+
+@app.websocket("/v1/local-agent/ws")
+async def local_agent_ws(websocket: WebSocket) -> None:
+    """Local companion dial-in. Auth via JARVIS_LOCAL_AGENT_TOKEN."""
+    await run_agent_socket(websocket)
+
+
+@app.post(
+    "/v1/weather",
+    response_model=WeatherResponse,
+    operation_id="get_weather",
+    dependencies=[Depends(authorize)],
+    summary="Current weather for a place (Open-Meteo, no confirmation)",
+)
+async def get_weather(request: WeatherRequest) -> WeatherResponse:
+    """Geocode a place and return current conditions. Safe public-info tool."""
+    try:
+        return await run_in_threadpool(fetch_weather, request.location, request.units)
+    except ExternalFetchError as exc:
+        logger.warning("weather_failed location=%r error=%s", request.location, exc)
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    "/v1/http/get",
+    response_model=HttpGetResponse,
+    operation_id="http_get_allowlisted",
+    dependencies=[Depends(authorize)],
+    summary="HTTPS GET on an allowlisted public-info host (no confirmation)",
+)
+async def http_get_allowlisted(request: HttpGetRequest) -> HttpGetResponse:
+    """Fetch a small HTTPS response from a hard-coded public-info host allowlist."""
+    try:
+        status_code, content_type, raw, truncated = await run_in_threadpool(
+            _http_get_bytes,
+            request.url,
+            timeout=HTTP_FETCH_TIMEOUT,
+            max_bytes=HTTP_FETCH_MAX_BYTES,
+        )
+    except ExternalFetchError as exc:
+        logger.warning("http_get_failed error=%s", exc)
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    body = _decode_body(raw)
+    logger.info(
+        "http_get_complete host=%s status=%s bytes=%s truncated=%s",
+        urllib.parse.urlparse(request.url).hostname,
+        status_code,
+        len(raw),
+        truncated,
+    )
+    return HttpGetResponse(
+        url=request.url,
+        status_code=status_code,
+        content_type=content_type,
+        body=body,
+        truncated=truncated,
+        bytes_read=len(raw),
+    )
 
 
 @app.get(
@@ -410,17 +1021,44 @@ def health() -> dict[str, Any]:
 def list_targets() -> list[TargetSummary]:
     """List aliases and safe example commands available to the assistant."""
     targets = load_targets()
-    return [
-        TargetSummary(
-            name=name,
-            description=target.description,
-            examples=target.examples,
-            mutating_commands_enabled=(
-                ENABLE_MUTATING_COMMANDS and target.allow_mutating
-            ),
+    agent_online = local_agent_hub.connected
+    summaries: list[TargetSummary] = []
+    for name, target in sorted(targets.items()):
+        available = True
+        if target.route == "local" and not agent_online:
+            available = False
+        summaries.append(
+            TargetSummary(
+                name=name,
+                description=target.description,
+                examples=target.examples,
+                mutating_commands_enabled=(
+                    ENABLE_MUTATING_COMMANDS and target.allow_mutating
+                ),
+                route=target.route,
+                available=available,
+            )
         )
-        for name, target in sorted(targets.items())
-    ]
+
+    seen = {item.name for item in summaries}
+    for item in local_agent_hub.advertised_targets():
+        name = str(item.get("name") or "")
+        if not name or name in seen or not SAFE_NAME_RE.fullmatch(name):
+            continue
+        summaries.append(
+            TargetSummary(
+                name=name,
+                description=str(item.get("description") or "Local-agent target"),
+                examples=[str(e) for e in (item.get("examples") or [])[:20]],
+                mutating_commands_enabled=bool(
+                    item.get("mutating_commands_enabled", False)
+                ),
+                route="local",
+                available=agent_online,
+            )
+        )
+        seen.add(name)
+    return summaries
 
 
 @app.post(
@@ -434,6 +1072,8 @@ async def run_command(request: ExecuteRequest) -> ExecuteResponse:
     """Run a full-match allowlisted command after normal tool confirmation."""
     targets = load_targets()
     target = targets.get(request.target)
+    if target is None:
+        target = target_from_agent_advertisement(request.target)
     if target is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -454,13 +1094,22 @@ async def run_command(request: ExecuteRequest) -> ExecuteResponse:
     started = time.monotonic()
 
     try:
-        exit_status, stdout, stderr, truncated = await run_in_threadpool(
-            execute_ssh,
-            request.target,
-            target,
-            request.command,
-            timeout_seconds,
-        )
+        if target.route == "local":
+            _require_local_agent()
+            exit_status, stdout, stderr, truncated = await execute_via_local_agent(
+                target_name=request.target,
+                target=target,
+                command=request.command,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            exit_status, stdout, stderr, truncated = await run_in_threadpool(
+                execute_ssh,
+                request.target,
+                target,
+                request.command,
+                timeout_seconds,
+            )
     except CommandTimedOut as exc:
         logger.warning(
             "ssh_timeout execution_id=%s target=%s timeout=%s",
@@ -492,6 +1141,8 @@ async def run_command(request: ExecuteRequest) -> ExecuteResponse:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="SSH authentication failed.",
         ) from exc
+    except HTTPException:
+        raise
     except (paramiko.SSHException, OSError, RuntimeError) as exc:
         logger.error(
             "ssh_connection_failed execution_id=%s target=%s error_type=%s",
@@ -499,16 +1150,22 @@ async def run_command(request: ExecuteRequest) -> ExecuteResponse:
             request.target,
             type(exc).__name__,
         )
+        detail = (
+            str(exc)
+            if target.route == "local"
+            else "SSH connection or execution failed; inspect tool-service logs."
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="SSH connection or execution failed; inspect tool-service logs.",
+            detail=detail,
         ) from exc
 
     duration_ms = round((time.monotonic() - started) * 1000)
     logger.info(
-        "ssh_complete execution_id=%s target=%s exit_status=%s duration_ms=%s truncated=%s",
+        "ssh_complete execution_id=%s target=%s route=%s exit_status=%s duration_ms=%s truncated=%s",
         execution_id,
         request.target,
+        target.route,
         exit_status,
         duration_ms,
         truncated,
@@ -522,3 +1179,69 @@ async def run_command(request: ExecuteRequest) -> ExecuteResponse:
         duration_ms=duration_ms,
         output_truncated=truncated,
     )
+
+
+@app.post(
+    "/v1/local/ping",
+    operation_id="local_ping",
+    dependencies=[Depends(authorize)],
+    summary="ICMP/TCP reachability check via the Windows local agent",
+)
+async def local_ping(request: LocalPingRequest) -> dict[str, Any]:
+    """Ping a host from the PC's network. Requires a connected local agent."""
+    _require_local_agent()
+    try:
+        return await local_agent_hub.rpc(
+            "ping",
+            {"host": request.host},
+            timeout=20,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+
+@app.post(
+    "/v1/local/resolve",
+    operation_id="local_resolve",
+    dependencies=[Depends(authorize)],
+    summary="DNS resolve via the Windows local agent",
+)
+async def local_resolve(request: LocalResolveRequest) -> dict[str, Any]:
+    """Resolve a name using the PC's DNS. Requires a connected local agent."""
+    _require_local_agent()
+    try:
+        return await local_agent_hub.rpc(
+            "resolve",
+            {"name": request.name},
+            timeout=15,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+
+@app.post(
+    "/v1/local/run",
+    operation_id="local_run",
+    dependencies=[Depends(authorize)],
+    summary="Run an allowlisted local companion command (confirmation required)",
+)
+async def local_run(request: LocalRunRequest) -> dict[str, Any]:
+    """Execute a narrowly allowlisted local command on the PC after confirm."""
+    _require_local_agent()
+    try:
+        return await local_agent_hub.rpc(
+            "local_run",
+            {"command": request.command, "require_confirm": True},
+            timeout=120,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
