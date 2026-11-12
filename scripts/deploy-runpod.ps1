@@ -225,7 +225,10 @@ $envNames = @(
     "SSH_MAX_OUTPUT_BYTES",
     "SSH_PRIVATE_KEY_B64",
     "SSH_TARGETS_YAML_B64",
-    "SSH_KNOWN_HOSTS_B64"
+    "SSH_KNOWN_HOSTS_B64",
+    "LOCAL_AGENT_ENABLED",
+    "JARVIS_LOCAL_AGENT_TOKEN",
+    "LOCAL_AGENT_LISTEN"
 )
 $podEnv = @{}
 foreach ($name in $envNames) {
@@ -239,6 +242,14 @@ $podEnv["WHISPER_DEVICE"] = "cpu"
 $podEnv["WHISPER_COMPUTE_TYPE"] = "int8"
 $podEnv["TAILSCALE_REQUIRED"] = "false"
 $podEnv.Remove("TS_AUTHKEY")
+
+# Default local-agent listen when a pairing token is configured.
+if ($podEnv["JARVIS_LOCAL_AGENT_TOKEN"] -and -not $podEnv["LOCAL_AGENT_LISTEN"]) {
+    $podEnv["LOCAL_AGENT_LISTEN"] = "0.0.0.0"
+}
+if ($podEnv["JARVIS_LOCAL_AGENT_TOKEN"] -and -not $podEnv["LOCAL_AGENT_ENABLED"]) {
+    $podEnv["LOCAL_AGENT_ENABLED"] = "true"
+}
 
 $templates = Invoke-JsonApi `
     -Method Get `
@@ -254,7 +265,8 @@ $templateBody = @{
     args                = ""
     category            = "NVIDIA"
     disk                = 50
-    ports               = @("3000/http")
+    # 8090 = jarvis-tools (local-agent WebSocket dial-in + tool API). Keep auth tokens strong.
+    ports               = @("3000/http", "8090/http")
     env                 = $podEnv
     public              = $false
     serverless          = $false
