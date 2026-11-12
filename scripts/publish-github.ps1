@@ -152,6 +152,15 @@ $files = Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object {
     if ($relative -like "secrets/*" -and $relative -ne "secrets/.gitkeep") {
         return $false
     }
+    if ($relative -like ".deployment/*" -or $relative -eq ".deployment") {
+        return $false
+    }
+    if ($_.Name -like ".poll*" -or $_.Name -like "*.lock") {
+        return $false
+    }
+    if ($relative -eq "scripts/watch-and-deploy-runpod.ps1") {
+        return $false
+    }
     foreach ($directory in $excludedDirectories) {
         if (
             $relative -eq $directory -or

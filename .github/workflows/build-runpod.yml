@@ -14,8 +14,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # ggml-cuda compile regularly exceeds 3h on GHA; allow up to 6h.
-    timeout-minutes: 360
+    # Prebuilt llama-server image; leave headroom for Open WebUI/Speaches installs.
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +31,27 @@ jobs:
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           echo "IMAGE_NAME=ghcr.io/${owner}/jarvis-runpod" >> "$GITHUB_ENV"
+          echo "PACKAGE_OWNER=${owner}" >> "$GITHUB_ENV"
+
+      - name: Reset private package so republish inherits public visibility
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set +e
+          # Prefer user package API; fall back to org if needed.
+          gh api -X DELETE "/user/packages/container/jarvis-runpod" >/tmp/pkg-delete.json 2>/tmp/pkg-delete.err
+          code=$?
+          if [[ $code -ne 0 ]]; then
+            gh api -X DELETE "/orgs/${{ github.repository_owner }}/packages/container/jarvis-runpod" >/tmp/pkg-delete.json 2>/tmp/pkg-delete.err
+            code=$?
+          fi
+          if [[ $code -eq 0 ]]; then
+            echo "Deleted existing jarvis-runpod package for a clean public republish."
+          else
+            echo "Package delete skipped (may not exist yet):"
+            cat /tmp/pkg-delete.err || true
+          fi
 
       - uses: docker/setup-buildx-action@v3
 
@@ -59,3 +80,39 @@ jobs:
             HUGGINGFACE_HUB_VERSION=2.4.0
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Ensure package is public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Packages published from a public repo should inherit public visibility.
+          # Explicitly set visibility when the endpoint is available.
+          for path in \
+            "/user/packages/container/jarvis-runpod" \
+            "/orgs/${{ github.repository_owner }}/packages/container/jarvis-runpod"
+          do
+            if gh api "$path" >/tmp/pkg.json 2>/tmp/pkg.err; then
+              visibility=$(jq -r '.visibility // empty' /tmp/pkg.json)
+              echo "Package at $path visibility=${visibility}"
+              if [[ "$visibility" != "public" ]]; then
+                gh api --method PATCH "$path" -f visibility=public \
+                  || gh api --method PUT "$path/visibility" -f visibility=public \
+                  || true
+              fi
+              break
+            fi
+          done
+          # Verify anonymous pull of the published tag.
+          token=$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${PACKAGE_OWNER}/jarvis-runpod:pull" | jq -r .token)
+          code=$(curl -sS -o /tmp/manifest.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${PACKAGE_OWNER}/jarvis-runpod/manifests/0.1.0")
+          echo "Anonymous manifest HTTP ${code}"
+          if [[ "$code" != "200" ]]; then
+            echo "Package is still not anonymously pullable:"
+            cat /tmp/manifest.json || true
+            exit 1
+          fi

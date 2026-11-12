@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$DataCenter = "EU-SE-1",
+    [string]$DataCenter = "",
     [int]$VolumeSizeGb = 100,
     [switch]$TemplateOnly
 )
@@ -72,6 +72,31 @@ function Require-Value {
     return $value
 }
 
+function Test-AnonymousGhcrPull {
+    param([string]$Image)
+    if ($Image -notmatch '^ghcr\.io/([^/]+)/([^:]+):(.+)$') {
+        return $false
+    }
+    $owner = $Matches[1]
+    $name = $Matches[2]
+    $tag = $Matches[3]
+    try {
+        $token = Invoke-RestMethod `
+            -Uri "https://ghcr.io/token?service=ghcr.io&scope=repository:${owner}/${name}:pull"
+        $null = Invoke-WebRequest `
+            -Uri "https://ghcr.io/v2/${owner}/${name}/manifests/${tag}" `
+            -Headers @{
+                Authorization = "Bearer $($token.token)"
+                Accept        = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+            } `
+            -UseBasicParsing
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $envPath = Join-Path $root ".env"
 if (-not (Test-Path -LiteralPath $envPath)) {
@@ -119,24 +144,32 @@ if ($latestRun.status -ne "completed" -or $latestRun.conclusion -ne "success") {
 $runpodHeaders = @{ Authorization = "Bearer $runpodKey" }
 $runpodBase = "https://api.runpod.io/v2"
 
-$registryList = Invoke-JsonApi `
-    -Method Get `
-    -Uri "$runpodBase/registries" `
-    -Headers $runpodHeaders
-$registry = @($registryList.registries) |
-    Where-Object { $_.name -eq "jarvis-ghcr" } |
-    Select-Object -First 1
-if (-not $registry) {
-    Write-Host "Creating private GHCR pull credential in RunPod..."
-    $registry = Invoke-JsonApi `
-        -Method Post `
+$publicImage = Test-AnonymousGhcrPull -Image $image
+$registryId = $null
+if (-not $publicImage) {
+    Write-Host "Image is private; configuring RunPod GHCR pull credentials..."
+    $registryList = Invoke-JsonApi `
+        -Method Get `
         -Uri "$runpodBase/registries" `
-        -Headers $runpodHeaders `
-        -Body @{
-            name     = "jarvis-ghcr"
-            username = $githubUser
-            password = $githubToken
-        }
+        -Headers $runpodHeaders
+    $registry = @($registryList.registries) |
+        Where-Object { $_.name -eq "jarvis-ghcr" } |
+        Select-Object -First 1
+    if (-not $registry) {
+        $registry = Invoke-JsonApi `
+            -Method Post `
+            -Uri "$runpodBase/registries" `
+            -Headers $runpodHeaders `
+            -Body @{
+                name     = "jarvis-ghcr"
+                username = $githubUser.ToLowerInvariant()
+                password = $githubToken
+            }
+    }
+    $registryId = $registry.id
+}
+else {
+    Write-Host "Image is anonymously pullable; no RunPod registry credential required."
 }
 
 $envNames = @(
@@ -186,10 +219,6 @@ foreach ($name in $envNames) {
     }
 }
 
-# The selected A40/A6000 class has 48 GB VRAM. Two slots share this total
-# context, yielding approximately 32K tokens per concurrent request.
-$podEnv["LLAMA_CTX_SIZE"] = "65536"
-$podEnv["LLAMA_PARALLEL"] = "2"
 $podEnv["WHISPER_DEVICE"] = "cpu"
 $podEnv["WHISPER_COMPUTE_TYPE"] = "int8"
 $podEnv["TAILSCALE_REQUIRED"] = "false"
@@ -202,27 +231,38 @@ $templates = Invoke-JsonApi `
 $template = @($templates.templates) |
     Where-Object { $_.name -eq "Jarvis AI Assistant 0.1.0" } |
     Select-Object -First 1
+$templateBody = @{
+    name                = "Jarvis AI Assistant 0.1.0"
+    image               = $image
+    args                = ""
+    category            = "NVIDIA"
+    disk                = 50
+    ports               = @("3000/http")
+    env                 = $podEnv
+    public              = $false
+    serverless          = $false
+    startSsh            = $false
+    startJupyter        = $false
+    allowedCudaVersions = @()
+}
+if ($registryId) {
+    $templateBody.registry = $registryId
+}
 if (-not $template) {
-    Write-Host "Creating private RunPod template..."
+    Write-Host "Creating RunPod template..."
     $template = Invoke-JsonApi `
         -Method Post `
         -Uri "$runpodBase/templates" `
         -Headers $runpodHeaders `
-        -Body @{
-            name                = "Jarvis AI Assistant 0.1.0"
-            image               = $image
-            args                = ""
-            category            = "NVIDIA"
-            disk                = 50
-            ports               = @("3000/http")
-            env                 = $podEnv
-            registry            = $registry.id
-            public              = $false
-            serverless          = $false
-            startSsh            = $false
-            startJupyter        = $false
-            allowedCudaVersions = @("12.8")
-        }
+        -Body $templateBody
+}
+else {
+    Write-Host "Updating RunPod template $($template.id)..."
+    $template = Invoke-JsonApi `
+        -Method Patch `
+        -Uri "$runpodBase/templates/$($template.id)" `
+        -Headers $runpodHeaders `
+        -Body $templateBody
 }
 
 if ($TemplateOnly) {
@@ -234,80 +274,131 @@ $existingPods = Invoke-JsonApi `
     -Method Get `
     -Uri "$runpodBase/pods" `
     -Headers $runpodHeaders
-$existingPod = @($existingPods.pods) |
-    Where-Object {
-        $_.name -eq "jarvis" -and
-        $_.status -ne "TERMINATED"
-    } |
-    Select-Object -First 1
-if ($existingPod) {
-    Write-Host "Jarvis Pod already exists: $($existingPod.id) ($($existingPod.status))"
-    Write-Host "URL: https://$($existingPod.id)-3000.proxy.runpod.net"
-    exit 0
+foreach ($existingPod in @($existingPods.pods)) {
+    if ($existingPod.name -ne "jarvis") { continue }
+    if ($existingPod.status -eq "TERMINATED") { continue }
+    if ($existingPod.status -eq "RUNNING") {
+        Write-Host "Jarvis Pod already running: $($existingPod.id)"
+        Write-Host "URL: https://$($existingPod.id)-3000.proxy.runpod.net"
+        exit 0
+    }
+    Write-Host "Terminating non-running Pod $($existingPod.id) ($($existingPod.status))..."
+    [void](Invoke-JsonApi `
+        -Method Post `
+        -Uri "$runpodBase/pods/$($existingPod.id)/action" `
+        -Headers $runpodHeaders `
+        -Body @{ action = "terminate" })
+}
+
+$datacenters = Invoke-JsonApi `
+    -Method Get `
+    -Uri "$runpodBase/catalog/datacenters" `
+    -Headers $runpodHeaders
+$volumeDcs = @($datacenters.dataCenters |
+    Where-Object { @($_.networkVolumeTypes) -contains "STANDARD" } |
+    ForEach-Object { $_.id })
+$gpus = Invoke-JsonApi `
+    -Method Get `
+    -Uri "$runpodBase/catalog/gpus?include=AVAILABILITY&product=POD&gpuCount=1&minCudaVersion=12.4" `
+    -Headers $runpodHeaders
+
+$candidates = @()
+foreach ($gpu in @($gpus.gpus)) {
+    if ($gpu.memory -lt 24 -or $gpu.price.secure -le 0 -or $gpu.price.secure -gt 2.0) {
+        continue
+    }
+    foreach ($loc in @($gpu.dataCenters)) {
+        if ($loc.id -notin $volumeDcs) { continue }
+        if ($loc.availability -eq "NONE") { continue }
+        if ($DataCenter -and $loc.id -ne $DataCenter) { continue }
+        $candidates += [pscustomobject]@{
+            Gpu          = $gpu.id
+            Memory       = [int]$gpu.memory
+            Price        = [double]$gpu.price.secure
+            Availability = $loc.availability
+            Dc           = $loc.id
+        }
+    }
+}
+$candidates = @($candidates | Sort-Object Price, Dc)
+if (-not $candidates) {
+    throw "No Secure Cloud GPU with Network Volume support is currently listed as available."
 }
 
 $volumes = Invoke-JsonApi `
     -Method Get `
     -Uri "$runpodBase/network-volumes" `
     -Headers $runpodHeaders
-$volume = @($volumes.networkVolumes) |
-    Where-Object {
-        $_.name -eq "jarvis-data" -and
-        $_.dataCenter -eq $DataCenter
-    } |
-    Select-Object -First 1
-if (-not $volume) {
-    Write-Host "Creating billable $VolumeSizeGb GB STANDARD Network Volume in $DataCenter..."
-    $volume = Invoke-JsonApi `
-        -Method Post `
-        -Uri "$runpodBase/network-volumes" `
-        -Headers $runpodHeaders `
-        -Body @{
-            name       = "jarvis-data"
-            size       = $VolumeSizeGb
-            dataCenter = $DataCenter
-            type       = "STANDARD"
-        }
-}
-
-$gpuCandidates = @(
-    "NVIDIA A40",
-    "NVIDIA RTX A6000"
-)
 $pod = $null
+$volume = $null
 $errors = @()
-foreach ($gpuId in $gpuCandidates) {
+foreach ($opt in $candidates) {
     try {
-        Write-Host "Requesting $gpuId in $DataCenter..."
+        Write-Host "Trying $($opt.Gpu) / $($opt.Dc) ($($opt.Memory) GB, `$$($opt.Price)/hr)..."
+        $volume = @($volumes.networkVolumes) |
+            Where-Object {
+                $_.name -eq "jarvis-data" -and
+                $_.dataCenter -eq $opt.Dc
+            } |
+            Select-Object -First 1
+        if (-not $volume) {
+            $volume = Invoke-JsonApi `
+                -Method Post `
+                -Uri "$runpodBase/network-volumes" `
+                -Headers $runpodHeaders `
+                -Body @{
+                    name       = "jarvis-data"
+                    size       = $VolumeSizeGb
+                    dataCenter = $opt.Dc
+                    type       = "STANDARD"
+                }
+            $volumes = Invoke-JsonApi `
+                -Method Get `
+                -Uri "$runpodBase/network-volumes" `
+                -Headers $runpodHeaders
+        }
+
+        $ctx = if ($opt.Memory -ge 40) { "65536" } else { "16384" }
+        $parallel = if ($opt.Memory -ge 40) { "2" } else { "1" }
+        $createEnv = @{}
+        foreach ($key in $podEnv.Keys) { $createEnv[$key] = $podEnv[$key] }
+        $createEnv["LLAMA_CTX_SIZE"] = $ctx
+        $createEnv["LLAMA_PARALLEL"] = $parallel
+
+        $createBody = @{
+            name             = "jarvis"
+            templateId       = $template.id
+            cloud            = "SECURE"
+            dataCenterIds    = @($opt.Dc)
+            globalNetworking = $false
+            gpu              = @{
+                id    = $opt.Gpu
+                count = 1
+            }
+            env              = $createEnv
+            mounts           = @{
+                network = @(
+                    @{
+                        volumeId = $volume.id
+                        path     = "/workspace"
+                    }
+                )
+            }
+            startSsh         = $false
+            startJupyter     = $false
+        }
+        if ($registryId) {
+            $createBody.registry = $registryId
+        }
         $pod = Invoke-JsonApi `
             -Method Post `
             -Uri "$runpodBase/pods" `
             -Headers $runpodHeaders `
-            -Body @{
-                name           = "jarvis"
-                templateId     = $template.id
-                cloud          = "SECURE"
-                dataCenterIds  = @($DataCenter)
-                globalNetworking = $false
-                gpu            = @{
-                    id    = $gpuId
-                    count = 1
-                }
-                mounts         = @{
-                    network = @(
-                        @{
-                            volumeId = $volume.id
-                            path     = "/workspace"
-                        }
-                    )
-                }
-                startSsh       = $false
-                startJupyter   = $false
-            }
+            -Body $createBody
         break
     }
     catch {
-        $errors += "$gpuId`: $($_.Exception.Message)"
+        $errors += "$($opt.Gpu)@$($opt.Dc): $($_.Exception.Message)"
     }
 }
 
@@ -315,17 +406,42 @@ if (-not $pod) {
     throw "No requested GPU had capacity. " + ($errors -join " | ")
 }
 
+# Remove unused jarvis-data volumes created during capacity search.
+$allVolumes = Invoke-JsonApi `
+    -Method Get `
+    -Uri "$runpodBase/network-volumes" `
+    -Headers $runpodHeaders
+$mountedIds = @()
+if ($pod.mounts.network) {
+    $mountedIds = @($pod.mounts.network | ForEach-Object { $_.volumeId })
+}
+foreach ($v in @($allVolumes.networkVolumes)) {
+    if ($v.name -ne "jarvis-data") { continue }
+    if ($v.id -in $mountedIds) { continue }
+    try {
+        Invoke-WebRequest `
+            -Method Delete `
+            -Uri "$runpodBase/network-volumes/$($v.id)" `
+            -Headers $runpodHeaders `
+            -UseBasicParsing | Out-Null
+        Write-Host "Deleted unused Network Volume $($v.id) in $($v.dataCenter)."
+    }
+    catch {
+        Write-Host "Could not delete unused volume $($v.id): $($_.Exception.Message)"
+    }
+}
+
 $deploymentDirectory = Join-Path $root ".deployment"
 New-Item -ItemType Directory -Force -Path $deploymentDirectory | Out-Null
 $record = @{
-    podId          = $pod.id
-    templateId     = $template.id
-    registryId     = $registry.id
+    podId           = $pod.id
+    templateId      = $template.id
+    registryId      = $registryId
     networkVolumeId = $volume.id
-    dataCenter     = $pod.dataCenterId
-    gpu            = $pod.gpu.id
-    image          = $image
-    createdAt      = [DateTime]::UtcNow.ToString("o")
+    dataCenter      = $pod.dataCenterId
+    gpu             = $pod.gpu.id
+    image           = $image
+    createdAt       = [DateTime]::UtcNow.ToString("o")
 }
 [IO.File]::WriteAllText(
     (Join-Path $deploymentDirectory "runpod.json"),
@@ -336,4 +452,5 @@ $record = @{
 Write-Host "Jarvis Pod created: $($pod.id)"
 Write-Host "Status: $($pod.status)"
 Write-Host "GPU: $($pod.gpu.id)"
+Write-Host "DataCenter: $($pod.dataCenterId)"
 Write-Host "URL: https://$($pod.id)-3000.proxy.runpod.net"
