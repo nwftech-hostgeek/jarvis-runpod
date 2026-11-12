@@ -111,7 +111,7 @@ export MODEL_PATH=${MODEL_PATH:-${data_root}/models/Qwen3-Coder-30B-A3B-Instruct
 export MODEL_ALIAS=${MODEL_ALIAS:-qwen3-coder-30b-a3b}
 export HF_REPO_ID=${HF_REPO_ID:-unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF}
 export HF_FILENAME=${HF_FILENAME:-Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf}
-export LLAMA_CTX_SIZE=${LLAMA_CTX_SIZE:-16384}
+export LLAMA_CTX_SIZE=${LLAMA_CTX_SIZE:-8192}
 export LLAMA_PARALLEL=${LLAMA_PARALLEL:-1}
 export LLAMA_N_GPU_LAYERS=${LLAMA_N_GPU_LAYERS:-99}
 export LLAMA_BATCH_SIZE=${LLAMA_BATCH_SIZE:-2048}
@@ -129,12 +129,12 @@ export DEFAULT_USER_ROLE=${DEFAULT_USER_ROLE:-pending}
 export AUDIO_STT_ENGINE=openai
 export AUDIO_STT_OPENAI_API_BASE_URL=http://127.0.0.1:8000/v1
 export AUDIO_STT_OPENAI_API_KEY=${VOICE_API_KEY}
-export AUDIO_STT_MODEL=${STT_MODEL:-Systran/faster-whisper-small}
+export AUDIO_STT_MODEL=${STT_MODEL:-Systran/faster-whisper-medium}
 export AUDIO_TTS_ENGINE=openai
 export AUDIO_TTS_OPENAI_API_BASE_URL=http://127.0.0.1:8000/v1
 export AUDIO_TTS_OPENAI_API_KEY=${VOICE_API_KEY}
 export AUDIO_TTS_MODEL=${TTS_MODEL:-speaches-ai/Kokoro-82M-v1.0-ONNX}
-export AUDIO_TTS_VOICE=${TTS_VOICE:-af_heart}
+export AUDIO_TTS_VOICE=${TTS_VOICE:-bm_george}
 export RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
 export DEFAULT_MODELS=${DEFAULT_MODELS:-${MODEL_ALIAS}}
 export WEBUI_AUTH=${WEBUI_AUTH:-true}
@@ -146,8 +146,8 @@ export DO_NOT_TRACK=true
 export ANONYMIZED_TELEMETRY=false
 
 export API_KEY=${VOICE_API_KEY}
-export PRELOAD_MODELS=${VOICE_PRELOAD_MODELS:-'["Systran/faster-whisper-small","speaches-ai/Kokoro-82M-v1.0-ONNX"]'}
-export WHISPER__MODEL=${STT_MODEL:-Systran/faster-whisper-small}
+export PRELOAD_MODELS=${VOICE_PRELOAD_MODELS:-'["Systran/faster-whisper-medium","speaches-ai/Kokoro-82M-v1.0-ONNX"]'}
+export WHISPER__MODEL=${STT_MODEL:-Systran/faster-whisper-medium}
 export WHISPER__INFERENCE_DEVICE=${WHISPER_DEVICE:-cpu}
 export WHISPER__COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
 if [ "${WHISPER__INFERENCE_DEVICE}" = "cpu" ]; then
@@ -229,5 +229,58 @@ unset SSH_PRIVATE_KEY_B64 SSH_TARGETS_YAML_B64 SSH_KNOWN_HOSTS_B64
 try_chown -h jarvis:jarvis \
     /run/jarvis-config/ssh-targets.yaml \
     /run/jarvis-config/ssh_known_hosts
+
+# Install the Jarvis orb / wake companion into Open WebUI's frontend+static trees
+# so it is reachable at /jarvis-orb/ without forking Open WebUI.
+orb_src=""
+if [ -d "${data_root}/jarvis-orb" ] && [ -f "${data_root}/jarvis-orb/index.html" ]; then
+    orb_src="${data_root}/jarvis-orb"
+elif [ -d /opt/jarvis-defaults/jarvis-orb ]; then
+    orb_src=/opt/jarvis-defaults/jarvis-orb
+    mkdir -p "${data_root}/jarvis-orb"
+    cp -a /opt/jarvis-defaults/jarvis-orb/. "${data_root}/jarvis-orb/"
+    try_chown -R jarvis:jarvis "${data_root}/jarvis-orb"
+fi
+if [ -n "${orb_src}" ]; then
+    ow_root="$(/opt/open-webui/bin/python -c 'import open_webui, os; print(os.path.dirname(open_webui.__file__))')"
+    for dest in "${ow_root}/frontend/jarvis-orb" "${ow_root}/static/jarvis-orb"; do
+        mkdir -p "${dest}/assets"
+        cp -a "${orb_src}/." "${dest}/"
+        try_chown -R jarvis:jarvis "${dest}"
+    done
+    # Default authenticated home is the always-listen orb. Chat stays at /?chat=1.
+    if [ -f "${orb_src}/jarvis-landing.js" ]; then
+        for dest_root in "${ow_root}/frontend" "${ow_root}/static"; do
+            mkdir -p "${dest_root}"
+            cp -f "${orb_src}/jarvis-landing.js" "${dest_root}/jarvis-landing.js"
+            try_chown jarvis:jarvis "${dest_root}/jarvis-landing.js"
+        done
+        for index in \
+            "${ow_root}/frontend/index.html" \
+            "${ow_root}/static/index.html"
+        do
+            if [ -f "${index}" ] \
+                && ! grep -q 'jarvis-landing.js' "${index}"
+            then
+                /opt/open-webui/bin/python - "${index}" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+snippet = '<script src="/jarvis-landing.js" defer></script>'
+if "jarvis-landing.js" not in text:
+    if "</head>" in text:
+        text = text.replace("</head>", f"  {snippet}\n</head>", 1)
+    else:
+        text = snippet + "\n" + text
+    path.write_text(text, encoding="utf-8")
+PY
+            fi
+        done
+    fi
+    # Open WebUI syncs frontend -> static as the jarvis user; keep static writable.
+    if [ -d "${ow_root}/static" ]; then
+        try_chown -R jarvis:jarvis "${ow_root}/static"
+    fi
+fi
 
 exec /usr/bin/supervisord --nodaemon --configuration /etc/supervisor/supervisord.conf
