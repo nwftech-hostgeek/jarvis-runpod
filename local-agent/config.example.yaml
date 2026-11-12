@@ -1,0 +1,51 @@
+# Copy to %APPDATA%\jarvis-local-agent\config.yaml (or set JARVIS_LOCAL_AGENT_CONFIG).
+# Do not commit real tokens.
+
+# HTTPS base URL of jarvis-tools on the Pod (RunPod proxy for port 8090), e.g.:
+#   https://<POD_ID>-8090.proxy.runpod.net
+tools_url: https://REPLACE_POD_ID-8090.proxy.runpod.net
+
+# Long random pairing token — must match JARVIS_LOCAL_AGENT_TOKEN on the Pod.
+# Prefer setting via env JARVIS_LOCAL_AGENT_TOKEN instead of writing it here.
+# token: ""
+
+# Optional agent id shown in cloud status.
+agent_id: windows-pc
+
+# Optional host allowlist for SSH/ping/resolve (empty = allow any host the
+# cloud already authorized via target config). Examples:
+# host_allowlist:
+#   - 192.168.1.1
+#   - nas.local
+#   - 10.0.0.0/24
+host_allowlist: []
+
+# Path to SSH private key used for LAN targets (OpenSSH format).
+# Defaults to %USERPROFILE%\.ssh\id_ed25519
+# identity_file: C:\Users\you\.ssh\id_ed25519
+
+# Optional known_hosts file (OpenSSH format). If missing, host-key policy is
+# RejectPolicy and connections fail until you pin keys.
+# known_hosts: C:\Users\you\.ssh\known_hosts
+
+# Local-only SSH targets advertised to Jarvis when this agent is online.
+# Same shape as config/ssh-targets.yaml entries, plus optional identity_file.
+targets: {}
+# targets:
+#   home-nas:
+#     host: 192.168.1.50
+#     user: jarvis
+#     port: 22
+#     description: Home NAS on LAN (via Windows local agent)
+#     examples:
+#       - uptime
+#       - hostname
+#     allowed_commands:
+#       - '^(hostname|uptime|whoami)$'
+#     allow_mutating: false
+
+# Narrow allowlist for local_run (full-match regex). Keep empty to disable.
+local_commands: []
+# local_commands:
+#   - '^ipconfig(?:\s+/all)?$'
+#   - '^Get-NetIPAddress$'
