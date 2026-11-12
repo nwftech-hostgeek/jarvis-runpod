@@ -108,7 +108,7 @@ jobs:
           token=$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${PACKAGE_OWNER}/jarvis-runpod:pull" | jq -r .token)
           code=$(curl -sS -o /tmp/manifest.json -w "%{http_code}" \
             -H "Authorization: Bearer ${token}" \
-            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json" \
             "https://ghcr.io/v2/${PACKAGE_OWNER}/jarvis-runpod/manifests/0.1.0")
           echo "Anonymous manifest HTTP ${code}"
           if [[ "$code" != "200" ]]; then

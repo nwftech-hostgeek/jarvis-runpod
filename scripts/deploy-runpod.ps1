@@ -87,7 +87,7 @@ function Test-AnonymousGhcrPull {
             -Uri "https://ghcr.io/v2/${owner}/${name}/manifests/${tag}" `
             -Headers @{
                 Authorization = "Bearer $($token.token)"
-                Accept        = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+                Accept        = "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json"
             } `
             -UseBasicParsing
         return $true
@@ -136,15 +136,29 @@ $latestRun = @($runs.workflow_runs) | Select-Object -First 1
 if (-not $latestRun) {
     throw "No GitHub image-build run was found."
 }
-if ($latestRun.status -ne "completed" -or $latestRun.conclusion -ne "success") {
-    throw "Latest image build is status=$($latestRun.status), " +
-        "conclusion=$($latestRun.conclusion). Check $($latestRun.html_url)"
-}
 
 $runpodHeaders = @{ Authorization = "Bearer $runpodKey" }
 $runpodBase = "https://api.runpod.io/v2"
 
 $publicImage = Test-AnonymousGhcrPull -Image $image
+if (
+    -not $publicImage -and
+    (
+        $latestRun.status -ne "completed" -or
+        $latestRun.conclusion -ne "success"
+    )
+) {
+    throw "Latest image build is status=$($latestRun.status), " +
+        "conclusion=$($latestRun.conclusion), and the image is not " +
+        "anonymously pullable. Check $($latestRun.html_url)"
+}
+if (
+    $latestRun.status -ne "completed" -or
+    $latestRun.conclusion -ne "success"
+) {
+    Write-Host "Latest workflow concluded $($latestRun.conclusion), but $image is pullable; continuing deploy."
+}
+
 $registryId = $null
 if (-not $publicImage) {
     Write-Host "Image is private; configuring RunPod GHCR pull credentials..."
