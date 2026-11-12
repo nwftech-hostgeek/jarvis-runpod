@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jarvis</title>
+  <link rel="stylesheet" href="./styles.css?v=2" />
+  <link rel="icon" href="./assets/jarvis-core.png?v=2" />
+</head>
+<body>
+  <div class="frame">
+    <header class="topbar">
+      <div class="brand">JARVIS</div>
+      <div id="status" class="status" data-state="idle">Idle — say “Hey Jarvis”</div>
+    </header>
+
+    <main class="stage">
+      <div id="orb" class="orb" data-state="idle" aria-label="Jarvis core">
+        <div class="orb-glow"></div>
+        <div class="orb-spin orb-spin-a"></div>
+        <div class="orb-spin orb-spin-b"></div>
+        <img
+          class="orb-art"
+          src="./assets/jarvis-core.png?v=2"
+          alt="Jarvis HUD orb"
+          draggable="false"
+        />
+        <div class="orb-pulse"></div>
+      </div>
+    </main>
+
+    <section class="panel">
+      <p class="hint">
+        Always-listen wake phrase runs in this browser tab (not Alexa-style OS-wide).
+        Keep this page open, allow the microphone, and use Chrome/Edge for best results.
+        Voice is an open Kokoro British male approximation (<code>bm_george</code>), not a movie clone.
+      </p>
+      <div class="row">
+        <button id="btnArm" type="button">Start listening</button>
+        <button id="btnStop" type="button" class="ghost" disabled>Stop</button>
+        <button id="btnTestSpeak" type="button" class="ghost">Test speak</button>
+        <a class="link" id="chatLink" href="/?chat=1" target="_blank" rel="noopener">Open chat</a>
+      </div>
+      <label class="field">
+        <span>Open WebUI API key (optional if already signed in)</span>
+        <input id="apiKey" type="password" autocomplete="off" placeholder="sk-… from User → Settings → Account" />
+      </label>
+      <div id="log" class="log" aria-live="polite"></div>
+    </section>
+  </div>
+  <script src="./app.js?v=2" type="module"></script>
+</body>
+</html>
