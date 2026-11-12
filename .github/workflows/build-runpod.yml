@@ -33,26 +33,6 @@ jobs:
           echo "IMAGE_NAME=ghcr.io/${owner}/jarvis-runpod" >> "$GITHUB_ENV"
           echo "PACKAGE_OWNER=${owner}" >> "$GITHUB_ENV"
 
-      - name: Reset private package so republish inherits public visibility
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set +e
-          # Prefer user package API; fall back to org if needed.
-          gh api -X DELETE "/user/packages/container/jarvis-runpod" >/tmp/pkg-delete.json 2>/tmp/pkg-delete.err
-          code=$?
-          if [[ $code -ne 0 ]]; then
-            gh api -X DELETE "/orgs/${{ github.repository_owner }}/packages/container/jarvis-runpod" >/tmp/pkg-delete.json 2>/tmp/pkg-delete.err
-            code=$?
-          fi
-          if [[ $code -eq 0 ]]; then
-            echo "Deleted existing jarvis-runpod package for a clean public republish."
-          else
-            echo "Package delete skipped (may not exist yet):"
-            cat /tmp/pkg-delete.err || true
-          fi
-
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -81,30 +61,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Ensure package is public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify anonymous pull
         shell: bash
         run: |
           set -euo pipefail
-          # Packages published from a public repo should inherit public visibility.
-          # Explicitly set visibility when the endpoint is available.
-          for path in \
-            "/user/packages/container/jarvis-runpod" \
-            "/orgs/${{ github.repository_owner }}/packages/container/jarvis-runpod"
-          do
-            if gh api "$path" >/tmp/pkg.json 2>/tmp/pkg.err; then
-              visibility=$(jq -r '.visibility // empty' /tmp/pkg.json)
-              echo "Package at $path visibility=${visibility}"
-              if [[ "$visibility" != "public" ]]; then
-                gh api --method PATCH "$path" -f visibility=public \
-                  || gh api --method PUT "$path/visibility" -f visibility=public \
-                  || true
-              fi
-              break
-            fi
-          done
-          # Verify anonymous pull of the published tag.
           token=$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${PACKAGE_OWNER}/jarvis-runpod:pull" | jq -r .token)
           code=$(curl -sS -o /tmp/manifest.json -w "%{http_code}" \
             -H "Authorization: Bearer ${token}" \
