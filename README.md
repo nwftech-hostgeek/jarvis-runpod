@@ -73,12 +73,26 @@ compose.48gb.yml          Higher-throughput 48 GB override
 docker/llama/             Reproducible CUDA llama.cpp build and downloader
 docker/runpod/            Supported all-in-one RunPod image
 docker/tools/             Allowlisted SSH API image
-tools/                    SSH API and host-key scanner
-openwebui-tools/          Native Open WebUI confirmation wrapper
+tools/                    SSH API, local-agent bridge, host-key scanner
+local-agent/              Windows LAN companion (SSH/ping/resolve bridge)
+openwebui-tools/          Native Open WebUI confirmation wrappers
 config/                   SSH target allowlist and pinned host keys
 prompts/                  Jarvis system prompt
 docs/MODELS.md            Model choices, sizes, and switching instructions
+docs/local-agent.md       Windows local-agent setup (LAN transparency)
 scripts/                  Initialization and smoke-test helpers
+```
+
+## Windows local agent (LAN bridge)
+
+RunPod cannot see your home LAN. A small Python agent on the PC dials into
+`jarvis-tools` over WebSocket and runs allowlisted LAN SSH / ping / resolve so
+Jarvis tools stay transparent. Setup, pairing token, and Task Scheduler notes:
+[docs/local-agent.md](docs/local-agent.md).
+
+```powershell
+.\scripts\start-local-agent.ps1 -Pair -ToolsUrl "https://<POD_ID>-8090.proxy.runpod.net"
+.\scripts\start-local-agent.ps1
 ```
 
 ## Prerequisites
@@ -267,9 +281,9 @@ LLAMA_CTX_SIZE=16384
 LLAMA_PARALLEL=1
 LLAMA_N_GPU_LAYERS=99
 
-STT_MODEL=Systran/faster-whisper-small
+STT_MODEL=Systran/faster-whisper-large-v3
 TTS_MODEL=speaches-ai/Kokoro-82M-v1.0-ONNX
-TTS_VOICE=af_heart
+TTS_VOICE=bm_george
 WHISPER_DEVICE=cpu
 WHISPER_COMPUTE_TYPE=int8
 
@@ -467,9 +481,10 @@ setting at or below the per-slot llama.cpp context.
 
 Open WebUI is preconfigured to use:
 
-- STT: `Systran/faster-whisper-small`
+- STT: `Systran/faster-whisper-large-v3` (CPU / int8; keeps LLM VRAM free)
 - TTS: `speaches-ai/Kokoro-82M-v1.0-ONNX`
-- Voice: `af_heart`
+- Voice: `bm_george` (open Kokoro British male — butler-like approximation,
+  **not** a Marvel / Paul Bettany clone)
 
 RunPod's HTTPS proxy provides the secure browser context required for microphone
 permission. On local HTTP, browsers generally permit microphone access on
@@ -480,9 +495,18 @@ Open WebUI database can override changed environment defaults. In user Audio
 settings, select the server default. Browser speech APIs remain available as a
 fallback.
 
+### Wake word + speaking orb
+
+Open WebUI does not provide Alexa-style OS-wide wake words. Use the companion
+page (same Pod, bookmarkable):
+
+`https://<POD_ID>-3000.proxy.runpod.net/jarvis-orb/`
+
+Say **“Hey Jarvis”** after clicking **Start listening**. Details and limits:
+[docs/WAKE.md](docs/WAKE.md).
+
 The 24 GB profile keeps Whisper and Kokoro's ONNX provider on CPU to protect
-LLM VRAM. The 48 GB override enables CUDA voice inference. Change `STT_MODEL`
-to a larger faster-whisper model if CPU/RAM and startup time permit.
+LLM VRAM. The 48 GB override enables CUDA voice inference.
 
 ## Models and GPU profiles
 
