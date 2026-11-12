@@ -170,10 +170,39 @@ if (-not ($files | Where-Object {
     throw "The RunPod image workflow is missing."
 }
 
+function Get-PublishBytes {
+    param(
+        [Parameter(Mandatory)][System.IO.FileInfo]$File,
+        [Parameter(Mandatory)][string]$RelativePath
+    )
+
+    $bytes = [IO.File]::ReadAllBytes($File.FullName)
+    $name = $File.Name
+    $normalizeLf = (
+        $name -like "*.sh" -or
+        $name -eq "Dockerfile" -or
+        $name -like "Dockerfile.*" -or
+        $name -like "*.yml" -or
+        $name -like "*.yaml" -or
+        $name -like "*.conf" -or
+        $RelativePath -eq ".gitattributes"
+    )
+    if (-not $normalizeLf) {
+        return $bytes
+    }
+
+    $text = [Text.Encoding]::UTF8.GetString($bytes)
+    if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) {
+        $text = $text.Substring(1)
+    }
+    $normalized = ($text -replace "`r`n", "`n") -replace "`r", "`n"
+    return [Text.UTF8Encoding]::new($false).GetBytes($normalized)
+}
+
 Write-Host "Uploading $($files.Count) non-secret project files..."
 $treeEntries = foreach ($file in $files) {
     $relative = $file.FullName.Substring($root.Length).TrimStart([char]92).Replace("\", "/")
-    $content = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file.FullName))
+    $content = [Convert]::ToBase64String((Get-PublishBytes -File $file -RelativePath $relative))
     $blob = Invoke-GitHub -Method Post -Path "$repoPath/git/blobs" -Body @{
         content  = $content
         encoding = "base64"
