@@ -1,0 +1,17 @@
+# Conservative settings for a single 24 GB NVIDIA GPU.
+# Usage: docker compose -f docker-compose.yml -f compose.24gb.yml up -d
+
+services:
+  llama:
+    environment:
+      LLAMA_CTX_SIZE: ${LLAMA_CTX_SIZE_24GB:-16384}
+      LLAMA_PARALLEL: ${LLAMA_PARALLEL_24GB:-1}
+      LLAMA_N_GPU_LAYERS: ${LLAMA_N_GPU_LAYERS_24GB:-99}
+      LLAMA_CACHE_TYPE_K: ${LLAMA_CACHE_TYPE_K_24GB:-q8_0}
+      LLAMA_CACHE_TYPE_V: ${LLAMA_CACHE_TYPE_V_24GB:-q8_0}
+
+  voice:
+    image: ${VOICE_IMAGE_24GB:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu}
+    environment:
+      WHISPER__INFERENCE_DEVICE: cpu
+      WHISPER__COMPUTE_TYPE: int8

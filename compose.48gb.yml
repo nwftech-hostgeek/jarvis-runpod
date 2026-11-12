@@ -1,0 +1,29 @@
+# Higher-throughput settings for a 48 GB (or larger) NVIDIA GPU.
+# LLAMA_CTX_SIZE is shared by the configured slots, so 65536 with two slots
+# provides approximately 32768 tokens per concurrent request.
+# Usage: docker compose -f docker-compose.yml -f compose.48gb.yml up -d
+
+services:
+  llama:
+    environment:
+      LLAMA_CTX_SIZE: ${LLAMA_CTX_SIZE_48GB:-65536}
+      LLAMA_PARALLEL: ${LLAMA_PARALLEL_48GB:-2}
+      LLAMA_N_GPU_LAYERS: ${LLAMA_N_GPU_LAYERS_48GB:-99}
+      LLAMA_CACHE_TYPE_K: ${LLAMA_CACHE_TYPE_K_48GB:-q8_0}
+      LLAMA_CACHE_TYPE_V: ${LLAMA_CACHE_TYPE_V_48GB:-q8_0}
+
+  voice:
+    image: ${VOICE_IMAGE_48GB:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda}
+    environment:
+      WHISPER__INFERENCE_DEVICE: cuda
+      WHISPER__COMPUTE_TYPE: float16
+      UNSTABLE_ORT_OPTS__EXCLUDE_PROVIDERS: '["TensorrtExecutionProvider"]'
+      STT_MODEL_TTL: ${VOICE_MODEL_TTL:-300}
+      TTS_MODEL_TTL: ${VOICE_MODEL_TTL:-300}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

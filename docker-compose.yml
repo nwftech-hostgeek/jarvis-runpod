@@ -1,0 +1,270 @@
+name: ${COMPOSE_PROJECT_NAME:-jarvis}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-20m}
+    max-file: ${LOG_MAX_FILES:-5}
+
+services:
+  llama:
+    image: jarvis-llama-cuda:${LLAMA_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: docker/llama/Dockerfile
+      args:
+        CUDA_VERSION: ${CUDA_VERSION:-12.8.1}
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b12316}
+    init: true
+    restart: unless-stopped
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_REPO_ID: ${HF_REPO_ID:-}
+      HF_FILENAME: ${HF_FILENAME:-}
+      HF_MODEL_PATTERN: ${HF_MODEL_PATTERN:-}
+      MODEL_PATH: ${MODEL_PATH:-/models/model.gguf}
+      MODEL_ALIAS: ${MODEL_ALIAS:-jarvis-model}
+      LLAMA_API_KEY: ${LLAMA_API_KEY:?Set LLAMA_API_KEY in .env}
+      LLAMA_CTX_SIZE: ${LLAMA_CTX_SIZE:-16384}
+      LLAMA_PARALLEL: ${LLAMA_PARALLEL:-1}
+      LLAMA_N_GPU_LAYERS: ${LLAMA_N_GPU_LAYERS:-99}
+      LLAMA_BATCH_SIZE: ${LLAMA_BATCH_SIZE:-2048}
+      LLAMA_UBATCH_SIZE: ${LLAMA_UBATCH_SIZE:-512}
+      LLAMA_CACHE_TYPE_K: ${LLAMA_CACHE_TYPE_K:-q8_0}
+      LLAMA_CACHE_TYPE_V: ${LLAMA_CACHE_TYPE_V:-q8_0}
+      LLAMA_FLASH_ATTN: ${LLAMA_FLASH_ATTN:-on}
+      LLAMA_THREADS: ${LLAMA_THREADS:-}
+      LLAMA_EXTRA_ARGS: ${LLAMA_EXTRA_ARGS:-}
+      HF_HOME: /models/.cache/huggingface
+      HF_XET_HIGH_PERFORMANCE: "1"
+    volumes:
+      - type: bind
+        source: ${JARVIS_DATA_ROOT:-./data}/models
+        target: /models
+    expose:
+      - "8080"
+    networks:
+      - jarvis
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 30m
+    stop_grace_period: 2m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+
+  voice:
+    image: ${VOICE_IMAGE:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu}
+    init: true
+    restart: unless-stopped
+    environment:
+      API_KEY: ${VOICE_API_KEY:?Set VOICE_API_KEY in .env}
+      PRELOAD_MODELS: ${VOICE_PRELOAD_MODELS:-["Systran/faster-whisper-small","speaches-ai/Kokoro-82M-v1.0-ONNX"]}
+      WHISPER__MODEL: ${STT_MODEL:-Systran/faster-whisper-small}
+      WHISPER__INFERENCE_DEVICE: ${WHISPER_DEVICE:-cpu}
+      WHISPER__COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      UNSTABLE_ORT_OPTS__EXCLUDE_PROVIDERS: ${ORT_EXCLUDE_PROVIDERS:-["TensorrtExecutionProvider","CUDAExecutionProvider"]}
+      STT_MODEL_TTL: ${VOICE_MODEL_TTL:--1}
+      TTS_MODEL_TTL: ${VOICE_MODEL_TTL:--1}
+      ENABLE_UI: "false"
+      LOG_LEVEL: info
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - type: bind
+        source: ${JARVIS_DATA_ROOT:-./data}/voice-cache
+        target: /home/ubuntu/.cache/huggingface/hub
+    expose:
+      - "8000"
+    networks:
+      - jarvis
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 15m
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+
+  tailscale:
+    image: ${TAILSCALE_IMAGE:-tailscale/tailscale:v1.104.4}
+    init: true
+    restart: unless-stopped
+    hostname: ${TS_HOSTNAME:-jarvis}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTH_ONCE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_USERSPACE: "true"
+      TS_SOCKS5_SERVER: ":1055"
+      TS_OUTBOUND_HTTP_PROXY_LISTEN: ":1055"
+      TS_HOSTNAME: ${TS_HOSTNAME:-jarvis}
+      TS_ACCEPT_DNS: ${TS_ACCEPT_DNS:-false}
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:---accept-routes}
+      TS_ENABLE_HEALTH_CHECK: "true"
+      TS_LOCAL_ADDR_PORT: ":9002"
+    volumes:
+      - type: bind
+        source: ${JARVIS_DATA_ROOT:-./data}/tailscale
+        target: /var/lib/tailscale
+    expose:
+      - "1055"
+      - "9002"
+    networks:
+      - jarvis
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "tailscale --socket=/var/run/tailscale/tailscaled.sock status --json >/dev/null 2>&1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 2m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+
+  jarvis-tools:
+    image: jarvis-tools:local
+    build:
+      context: .
+      dockerfile: docker/tools/Dockerfile
+    init: true
+    restart: unless-stopped
+    environment:
+      TOOL_API_KEY: ${TOOL_API_KEY:?Set TOOL_API_KEY in .env}
+      SSH_TARGETS_FILE: /config/ssh-targets.yaml
+      SSH_KNOWN_HOSTS_FILE: /config/ssh_known_hosts
+      SSH_PRIVATE_KEY_PATH: /run/secrets/ssh/${SSH_PRIVATE_KEY_FILE_NAME:-id_ed25519}
+      SSH_SOCKS5_HOST: tailscale
+      SSH_SOCKS5_PORT: "1055"
+      SSH_ENABLE_MUTATING_COMMANDS: ${SSH_ENABLE_MUTATING_COMMANDS:-false}
+      SSH_DEFAULT_TIMEOUT: ${SSH_DEFAULT_TIMEOUT:-30}
+      SSH_MAX_OUTPUT_BYTES: ${SSH_MAX_OUTPUT_BYTES:-262144}
+    volumes:
+      - type: bind
+        source: ${SSH_TARGETS_FILE:-./config/ssh-targets.yaml}
+        target: /config/ssh-targets.yaml
+        read_only: true
+      - type: bind
+        source: ${SSH_KNOWN_HOSTS_FILE:-./config/ssh_known_hosts}
+        target: /config/ssh_known_hosts
+        read_only: true
+      - type: bind
+        source: ./secrets
+        target: /run/secrets-src/ssh
+        read_only: true
+    expose:
+      - "8090"
+    networks:
+      - jarvis
+    depends_on:
+      tailscale:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run/secrets/ssh:size=4m,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_READ_SEARCH
+      - SETGID
+      - SETUID
+    logging: *default-logging
+
+  open-webui:
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:0.13.3}
+    init: true
+    restart: unless-stopped
+    environment:
+      ENV: prod
+      WEBUI_NAME: Jarvis
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?Set WEBUI_SECRET_KEY in .env}
+      WEBUI_AUTH: ${WEBUI_AUTH:-true}
+      ENABLE_SIGNUP: ${ENABLE_SIGNUP:-false}
+      DEFAULT_USER_ROLE: ${DEFAULT_USER_ROLE:-pending}
+      ENABLE_API_KEYS: "true"
+      WEBSOCKET_EVENT_CALLER_TIMEOUT: "120"
+      ENABLE_OLLAMA_API: "false"
+      OPENAI_API_BASE_URLS: http://llama:8080/v1
+      OPENAI_API_KEYS: ${LLAMA_API_KEY:?Set LLAMA_API_KEY in .env}
+      DEFAULT_MODELS: ${MODEL_ALIAS:-jarvis-model}
+      AUDIO_STT_ENGINE: openai
+      AUDIO_STT_OPENAI_API_BASE_URL: http://voice:8000/v1
+      AUDIO_STT_OPENAI_API_KEY: ${VOICE_API_KEY:?Set VOICE_API_KEY in .env}
+      AUDIO_STT_MODEL: ${STT_MODEL:-Systran/faster-whisper-small}
+      AUDIO_TTS_ENGINE: openai
+      AUDIO_TTS_OPENAI_API_BASE_URL: http://voice:8000/v1
+      AUDIO_TTS_OPENAI_API_KEY: ${VOICE_API_KEY:?Set VOICE_API_KEY in .env}
+      AUDIO_TTS_MODEL: ${TTS_MODEL:-speaches-ai/Kokoro-82M-v1.0-ONNX}
+      AUDIO_TTS_VOICE: ${TTS_VOICE:-af_heart}
+      AUDIO_TTS_SPLIT_ON: punctuation
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      WEBUI_URL: ${WEBUI_URL:-}
+      DATA_DIR: /app/backend/data
+      HF_HOME: /app/backend/data/cache/huggingface
+      HF_TOKEN: ${HF_TOKEN:-}
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+    volumes:
+      - type: bind
+        source: ${JARVIS_DATA_ROOT:-./data}/open-webui
+        target: /app/backend/data
+    ports:
+      - "${OPEN_WEBUI_BIND:-0.0.0.0}:${OPEN_WEBUI_PORT:-3000}:8080"
+    networks:
+      - jarvis
+    depends_on:
+      llama:
+        condition: service_healthy
+      voice:
+        condition: service_healthy
+      jarvis-tools:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 3m
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+networks:
+  jarvis:
+    name: ${COMPOSE_PROJECT_NAME:-jarvis}-network
+    driver: bridge

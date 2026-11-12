@@ -1,0 +1,16 @@
+.git
+.github
+.env
+data
+secrets
+config
+*.gguf
+*.part
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+README.md
+docs
+prompts
+openwebui-tools

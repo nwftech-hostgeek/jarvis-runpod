@@ -1,0 +1,36 @@
+# Targets are addressed only by alias; callers cannot supply an arbitrary host.
+# Replace the empty mapping below with entries like this:
+#
+# targets:
+#   core-router:
+#     host: core-router.example-tailnet.ts.net
+#     user: jarvis-audit
+#     port: 22
+#     description: Read-only checks on the core router
+#     identity_file: /run/secrets/ssh/id_ed25519
+#     connect_timeout: 15
+#     command_timeout: 30
+#     allow_mutating: false
+#     examples:
+#       - hostname
+#       - uptime
+#       - ip route show
+#       - systemctl is-active sshd
+#     # Every command must match one entire regular expression.
+#     allowed_commands:
+#       - '^(hostname|uptime|whoami|free -h|df -h)$'
+#       - '^uname(?:\s+-[a-zA-Z]+)?$'
+#       - '^ip\s+(?:addr|route)(?:\s+show)?$'
+#       - '^systemctl\s+(?:status|is-active)\s+[a-zA-Z0-9_.@-]+$'
+#       - '^journalctl\s+-u\s+[a-zA-Z0-9_.@-]+\s+-n\s+(?:[1-9][0-9]{0,2}|1000)\s+--no-pager$'
+#     # Keep write/disruptive patterns in a separate list:
+#     mutating_commands:
+#       - '^systemctl restart my-approved-service$'
+#
+# To permit a mutating command, three controls must all agree:
+# 1. its complete command matches mutating_commands;
+# 2. allow_mutating is true for this target; and
+# 3. SSH_ENABLE_MUTATING_COMMANDS=true is set in .env.
+# Keep the default read-only unless an operational workflow truly requires more.
+
+targets: {}

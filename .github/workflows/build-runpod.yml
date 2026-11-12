@@ -1,0 +1,60 @@
+name: Build RunPod image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: jarvis-runpod-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          docker system prune --all --force
+          df -h
+
+      - name: Set image name
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "IMAGE_NAME=ghcr.io/${owner}/jarvis-runpod" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/runpod/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.IMAGE_NAME }}:0.1.0
+            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          build-args: |
+            CUDA_VERSION=12.8.1
+            LLAMA_CPP_REF=b12316
+            OPEN_WEBUI_VERSION=0.13.3
+            SPEACHES_REF=v0.9.0-rc.3
+            HUGGINGFACE_HUB_VERSION=2.4.0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
