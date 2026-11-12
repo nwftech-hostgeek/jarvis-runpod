@@ -63,3 +63,15 @@
 2026-11-12T11:54:32.4177246-05:00 cycle=27 id=43231662096 status=completed conclusion=cancelled url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43231662096
 2026-11-12T11:54:32.7479100-05:00 id=43231662096 status=completed conclusion=cancelled url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43231662096
 2026-11-12T11:54:32.7821399-05:00 FAILED: Build failed with conclusion=cancelled. See https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43231662096
+==== restart 2026-11-12T11:58:30.2606824-05:00 after timeout fix ====
+==== watcher start 2026-11-12T11:58:30.9244383-05:00 pid=12872 ====
+2026-11-12T11:58:30.9344919-05:00 Starting detached durable poll-and-deploy watcher (12h outer budget)
+2026-11-12T11:58:31.8009639-05:00 cycle=1 id=43264396347 status=in_progress conclusion= url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43264396347
+2026-11-12T11:59:32.2559188-05:00 cycle=2 id=43264396347 status=in_progress conclusion= url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43264396347
+2026-11-12T12:00:32.8058419-05:00 cycle=3 id=43264396347 status=in_progress conclusion= url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43264396347
+2026-11-12T12:01:33.3134425-05:00 cycle=4 id=43264396347 status=in_progress conclusion= url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43264396347
+2026-11-12T12:02:33.7937119-05:00 cycle=5 id=43264396347 status=in_progress conclusion= url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43264396347
+2026-11-12T12:03:34.2062384-05:00 cycle=6 id=43264396347 status=in_progress conclusion= url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43264396347
+2026-11-12T12:04:34.6395584-05:00 cycle=7 id=43264396347 status=in_progress conclusion= url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43264396347
+2026-11-12T12:05:35.1166968-05:00 cycle=8 id=43264396347 status=in_progress conclusion= url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43264396347
+2026-11-12T12:06:35.5696757-05:00 cycle=9 id=43264396347 status=completed conclusion=failure url=https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43264396347

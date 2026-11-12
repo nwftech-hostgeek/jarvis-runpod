@@ -1,1 +1,1 @@
-﻿Build failed with conclusion=cancelled. See https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43231662096
+﻿Build failed with conclusion=failure. See https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43264396347
