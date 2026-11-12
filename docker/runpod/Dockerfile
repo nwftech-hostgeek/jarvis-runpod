@@ -2,34 +2,13 @@
 #
 # RunPod GPU Pods run one container and do not support Docker Compose. This
 # image packages the same services under supervisord for that supported model.
+# llama-server is taken from the official CUDA image so CI does not compile nvcc.
 
 ARG CUDA_VERSION=12.8.1
+ARG LLAMA_CPP_REF=b12316
 ARG TAILSCALE_VERSION=v1.104.4
 
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS llama-builder
-
-ARG LLAMA_CPP_REF=b12316
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-        build-essential ca-certificates cmake git libcurl4-openssl-dev libssl-dev pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /src
-RUN git clone --filter=blob:none https://github.com/ggml-org/llama.cpp.git \
-    && cd llama.cpp \
-    && git checkout "${LLAMA_CPP_REF}" \
-    && cmake -S . -B build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_SHARED_LIBS=OFF \
-        -DGGML_CUDA=ON \
-        -DGGML_NATIVE=OFF \
-        -DLLAMA_BUILD_TESTS=OFF \
-        -DLLAMA_BUILD_EXAMPLES=OFF \
-        -DLLAMA_BUILD_TOOLS=ON \
-        -DLLAMA_BUILD_SERVER=ON \
-        -DLLAMA_BUILD_UI=OFF \
-        -DLLAMA_BUILD_APP=OFF \
-    && cmake --build build --config Release --target llama-server --parallel "$(nproc)" \
-    && strip build/bin/llama-server
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda12-${LLAMA_CPP_REF} AS llama
 
 FROM tailscale/tailscale:${TAILSCALE_VERSION} AS tailscale
 
@@ -63,7 +42,10 @@ RUN apt-get update \
     && useradd --create-home --uid 10001 --shell /bin/bash jarvis \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=llama-builder /src/llama.cpp/build/bin/llama-server /usr/local/bin/llama-server
+COPY --from=llama /app/ /opt/llama-cpp/
+RUN test -x /opt/llama-cpp/llama-server \
+    && ln -sf /opt/llama-cpp/llama-server /usr/local/bin/llama-server
+
 COPY --from=tailscale /usr/local/bin/tailscale /usr/local/bin/tailscale
 COPY --from=tailscale /usr/local/bin/tailscaled /usr/local/bin/tailscaled
 COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /usr/local/bin/uv
@@ -127,6 +109,7 @@ RUN mkdir -p \
         /workspace/jarvis-config
 
 ENV PATH=/opt/huggingface/bin:${PATH} \
+    LD_LIBRARY_PATH=/opt/llama-cpp:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:${LD_LIBRARY_PATH} \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     RUNPOD_DATA_ROOT=/workspace/jarvis-data \

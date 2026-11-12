@@ -1,0 +1,8 @@
+Build failed with conclusion=cancelled. See https://github.com/nwftech-hostgeek/jarvis-runpod/actions/runs/43231662096
+At C:\Users\jones448\jarvis\scripts\watch-and-deploy-runpod.ps1:109 char:17
++                 throw $msg
++                 ~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (Build failed wi...uns/43231662096:String) [], RuntimeException
+    + FullyQualifiedErrorId : Build failed with conclusion=cancelled. See https://github.com/nwftech-hostgeek/jarvis-r 
+   unpod/actions/runs/43231662096
+ 

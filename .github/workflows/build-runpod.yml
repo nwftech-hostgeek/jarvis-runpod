@@ -14,7 +14,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # ggml-cuda compile regularly exceeds 3h on GHA; allow up to 6h.
+    timeout-minutes: 360
 
     steps:
       - uses: actions/checkout@v4
