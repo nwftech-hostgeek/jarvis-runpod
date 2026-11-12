@@ -56,7 +56,7 @@ try {
                 try {
                     $versions = Invoke-RestMethod -Uri $base -Headers $headers
                     foreach ($v in @($versions)) {
-                        if (@($v.metadata.container.tags) -contains '0.1.0') {
+                        if (@($v.metadata.container.tags) -contains '0.1.1') {
                             $tagOk = $true
                             break
                         }
@@ -72,17 +72,17 @@ try {
                         Accept        = 'application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
                         'User-Agent'  = 'jarvis-runpod-deployer'
                     }
-                    $resp = Invoke-WebRequest -Uri "https://ghcr.io/v2/$owner/$pkg/manifests/0.1.0" -Headers $mh -Method Head
+                    $resp = Invoke-WebRequest -Uri "https://ghcr.io/v2/$owner/$pkg/manifests/0.1.1" -Headers $mh -Method Head
                     if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 300) { $tagOk = $true }
                 }
                 catch {}
             }
             if (-not $tagOk) {
-                throw 'Build succeeded but ghcr.io/nwftech-hostgeek/jarvis-runpod:0.1.0 was not found.'
+                throw 'Build succeeded but ghcr.io/nwftech-hostgeek/jarvis-runpod:0.1.1 was not found.'
             }
 
-            Write-Status 'Image tag 0.1.0 confirmed. Starting deploy-runpod.ps1'
-            & (Join-Path $PSScriptRoot 'deploy-runpod.ps1')
+            Write-Status 'Image tag 0.1.1 confirmed. Starting deploy-runpod.ps1'
+            & (Join-Path $PSScriptRoot 'deploy-runpod.ps1') -ForceRestart -NetworkVolumeId '3s1rieoxf6'
             Write-Status 'Deploy script finished successfully'
             exit 0
         }

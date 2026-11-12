@@ -18,6 +18,40 @@ require_secret() {
     fi
 }
 
+# Network Volumes often disallow chown. Never hard-fail ownership changes on
+# /workspace mounts; prefer mkdir + soft chown, then verify writability.
+try_chown() {
+    chown "$@" 2>/dev/null || true
+}
+
+ensure_local_dir() {
+    # Local/tmpfs paths support real ownership; keep these strict.
+    install -d -o "$2" -g "$3" "$1"
+}
+
+ensure_volume_dir() {
+    dir=$1
+    owner=$2
+    group=$3
+    mkdir -p "${dir}"
+    try_chown "${owner}:${group}" "${dir}"
+}
+
+can_write_as() {
+    user=$1
+    path=$2
+    if [ "${user}" = "root" ]; then
+        test -w "${path}"
+        return
+    fi
+    # Prefer runuser when present; fall back to su.
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "${user}" -- test -w "${path}"
+    else
+        su -s /bin/sh "${user}" -c "test -w \"${path}\""
+    fi
+}
+
 require_secret LLAMA_API_KEY 20
 require_secret WEBUI_SECRET_KEY 32
 require_secret VOICE_API_KEY 20
@@ -36,15 +70,38 @@ unset RUNPOD_API_KEY
 data_root=${RUNPOD_DATA_ROOT:-/workspace/jarvis-data}
 config_root=${RUNPOD_CONFIG_ROOT:-/workspace/jarvis-config}
 
-install -d -o jarvis -g jarvis \
+ensure_volume_dir "${data_root}/models" jarvis jarvis
+ensure_volume_dir "${data_root}/open-webui" jarvis jarvis
+ensure_volume_dir "${data_root}/voice-cache" jarvis jarvis
+ensure_volume_dir "${data_root}/tailscale" root root
+ensure_volume_dir "${config_root}" jarvis jarvis
+
+ensure_local_dir /run/jarvis-config jarvis jarvis
+ensure_local_dir /run/secrets/ssh jarvis jarvis
+ensure_local_dir /run/secrets/tailscale root root
+ensure_local_dir /run/tailscale root root
+
+# If chown was denied, try relaxing mode so uid 10001 can still write.
+export JARVIS_SERVICE_USER=jarvis
+for volume_path in \
     "${data_root}/models" \
     "${data_root}/open-webui" \
-    "${data_root}/voice-cache"
-install -d -o root -g root "${data_root}/tailscale"
-install -d -o jarvis -g jarvis "${config_root}"
-install -d -o jarvis -g jarvis /run/jarvis-config /run/secrets/ssh
-install -d -o root -g root /run/secrets/tailscale
-install -d -o root -g root /run/tailscale
+    "${data_root}/voice-cache" \
+    "${config_root}"
+do
+    if ! can_write_as jarvis "${volume_path}"; then
+        chmod a+rwx "${volume_path}" 2>/dev/null || true
+    fi
+done
+
+if ! can_write_as jarvis "${data_root}/models" \
+    || ! can_write_as jarvis "${data_root}/open-webui" \
+    || ! can_write_as jarvis "${data_root}/voice-cache" \
+    || ! can_write_as jarvis "${config_root}"
+then
+    printf 'Warning: Network Volume not writable by jarvis; starting data services as root\n' >&2
+    export JARVIS_SERVICE_USER=root
+fi
 
 if [ ! -e /models ]; then
     ln -s "${data_root}/models" /models
@@ -131,24 +188,24 @@ export SSH_KNOWN_HOSTS_FILE=/run/jarvis-config/ssh_known_hosts
 
 if [ ! -f "${config_root}/ssh-targets.yaml" ]; then
     cp /opt/jarvis-defaults/ssh-targets.yaml "${config_root}/ssh-targets.yaml"
-    chown jarvis:jarvis "${config_root}/ssh-targets.yaml"
+    try_chown jarvis:jarvis "${config_root}/ssh-targets.yaml"
 fi
 if [ ! -f "${config_root}/ssh_known_hosts" ]; then
     cp /opt/jarvis-defaults/ssh_known_hosts "${config_root}/ssh_known_hosts"
-    chown jarvis:jarvis "${config_root}/ssh_known_hosts"
+    try_chown jarvis:jarvis "${config_root}/ssh_known_hosts"
 fi
 
 if [ -n "${SSH_TARGETS_YAML_B64:-}" ]; then
     printf '%s' "${SSH_TARGETS_YAML_B64}" | base64 --decode \
         > "${config_root}/ssh-targets.yaml"
-    chown jarvis:jarvis "${config_root}/ssh-targets.yaml"
+    try_chown jarvis:jarvis "${config_root}/ssh-targets.yaml"
 fi
 ln -sf "${config_root}/ssh-targets.yaml" /run/jarvis-config/ssh-targets.yaml
 
 if [ -n "${SSH_KNOWN_HOSTS_B64:-}" ]; then
     printf '%s' "${SSH_KNOWN_HOSTS_B64}" | base64 --decode \
         > "${config_root}/ssh_known_hosts"
-    chown jarvis:jarvis "${config_root}/ssh_known_hosts"
+    try_chown jarvis:jarvis "${config_root}/ssh_known_hosts"
 fi
 ln -sf "${config_root}/ssh_known_hosts" /run/jarvis-config/ssh_known_hosts
 
@@ -162,14 +219,14 @@ fi
 
 if [ -f /run/secrets/ssh/id_ed25519 ]; then
     chmod 0400 /run/secrets/ssh/id_ed25519
-    chown jarvis:jarvis /run/secrets/ssh/id_ed25519
+    try_chown jarvis:jarvis /run/secrets/ssh/id_ed25519
 else
     printf 'Warning: no SSH private key configured; SSH tools will remain unavailable.\n' >&2
 fi
 
 unset SSH_PRIVATE_KEY_B64 SSH_TARGETS_YAML_B64 SSH_KNOWN_HOSTS_B64
 
-chown -h jarvis:jarvis \
+try_chown -h jarvis:jarvis \
     /run/jarvis-config/ssh-targets.yaml \
     /run/jarvis-config/ssh_known_hosts
 

@@ -238,7 +238,7 @@ Invoke-GitHub -Method Patch -Path "$repoPath/git/refs/heads/$branch" -Body @{
     force = $false
 } | Out-Null
 
-$image = "ghcr.io/$($owner.ToLowerInvariant())/jarvis-runpod:0.1.0"
+$image = "ghcr.io/$($owner.ToLowerInvariant())/jarvis-runpod:0.1.1"
 Set-DotEnvValue -Path $envPath -Name "RUNPOD_IMAGE" -Value $image
 
 Invoke-GitHub -Method Post `

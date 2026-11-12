@@ -25,8 +25,9 @@ chmod 0700 secrets "${root}/tailscale"
 
 if [ "$(id -u)" -eq 0 ]; then
     # IDs match the non-root users in the custom llama and Speaches images.
-    chown 10001:10001 "${root}/models"
-    chown 1000:1000 "${root}/voice-cache"
+    # Soft-fail: Network Volumes and some bind mounts disallow chown.
+    chown 10001:10001 "${root}/models" 2>/dev/null || true
+    chown 1000:1000 "${root}/voice-cache" 2>/dev/null || true
 else
     printf '%s\n' \
         "Data directories created at ${root}." \

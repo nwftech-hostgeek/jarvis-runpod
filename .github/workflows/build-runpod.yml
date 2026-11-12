@@ -50,6 +50,7 @@ jobs:
           push: true
           provenance: false
           tags: |
+            ${{ env.IMAGE_NAME }}:0.1.1
             ${{ env.IMAGE_NAME }}:0.1.0
             ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
           build-args: |
@@ -69,7 +70,7 @@ jobs:
           code=$(curl -sS -o /tmp/manifest.json -w "%{http_code}" \
             -H "Authorization: Bearer ${token}" \
             -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json" \
-            "https://ghcr.io/v2/${PACKAGE_OWNER}/jarvis-runpod/manifests/0.1.0")
+            "https://ghcr.io/v2/${PACKAGE_OWNER}/jarvis-runpod/manifests/0.1.1")
           echo "Anonymous manifest HTTP ${code}"
           if [[ "$code" != "200" ]]; then
             echo "Package is still not anonymously pullable:"

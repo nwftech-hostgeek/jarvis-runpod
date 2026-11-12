@@ -2,7 +2,9 @@
 param(
     [string]$DataCenter = "",
     [int]$VolumeSizeGb = 100,
-    [switch]$TemplateOnly
+    [switch]$TemplateOnly,
+    [switch]$ForceRestart,
+    [string]$NetworkVolumeId = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -242,11 +244,12 @@ $templates = Invoke-JsonApi `
     -Method Get `
     -Uri "$runpodBase/templates" `
     -Headers $runpodHeaders
+$templateName = "Jarvis AI Assistant 0.1.1"
 $template = @($templates.templates) |
-    Where-Object { $_.name -eq "Jarvis AI Assistant 0.1.0" } |
+    Where-Object { $_.name -eq $templateName -or $_.name -eq "Jarvis AI Assistant 0.1.0" } |
     Select-Object -First 1
 $templateBody = @{
-    name                = "Jarvis AI Assistant 0.1.0"
+    name                = $templateName
     image               = $image
     args                = ""
     category            = "NVIDIA"
@@ -284,6 +287,23 @@ if ($TemplateOnly) {
     exit 0
 }
 
+$deploymentRecordPath = Join-Path $root ".deployment/runpod.json"
+$preferredVolumeId = $NetworkVolumeId
+if (-not $preferredVolumeId -and (Test-Path -LiteralPath $deploymentRecordPath)) {
+    try {
+        $prior = Get-Content -LiteralPath $deploymentRecordPath -Raw | ConvertFrom-Json
+        if ($prior.networkVolumeId) {
+            $preferredVolumeId = [string]$prior.networkVolumeId
+        }
+        if (-not $DataCenter -and $prior.dataCenter) {
+            $DataCenter = [string]$prior.dataCenter
+        }
+    }
+    catch {
+        Write-Host "Could not read prior deployment record; continuing."
+    }
+}
+
 $existingPods = Invoke-JsonApi `
     -Method Get `
     -Uri "$runpodBase/pods" `
@@ -291,12 +311,20 @@ $existingPods = Invoke-JsonApi `
 foreach ($existingPod in @($existingPods.pods)) {
     if ($existingPod.name -ne "jarvis") { continue }
     if ($existingPod.status -eq "TERMINATED") { continue }
-    if ($existingPod.status -eq "RUNNING") {
+    $existingImage = [string]$existingPod.image
+    if (-not $existingImage) {
+        $existingImage = [string]$existingPod.template.image
+    }
+    $needsRestart = $ForceRestart -or (
+        $existingImage -and
+        $existingImage -ne $image
+    )
+    if ($existingPod.status -eq "RUNNING" -and -not $needsRestart) {
         Write-Host "Jarvis Pod already running: $($existingPod.id)"
         Write-Host "URL: https://$($existingPod.id)-3000.proxy.runpod.net"
         exit 0
     }
-    Write-Host "Terminating non-running Pod $($existingPod.id) ($($existingPod.status))..."
+    Write-Host "Terminating Pod $($existingPod.id) ($($existingPod.status)) for image update..."
     [void](Invoke-JsonApi `
         -Method Post `
         -Uri "$runpodBase/pods/$($existingPod.id)/action" `
@@ -343,19 +371,38 @@ $volumes = Invoke-JsonApi `
     -Method Get `
     -Uri "$runpodBase/network-volumes" `
     -Headers $runpodHeaders
+$preservedVolumeIds = @()
+if ($preferredVolumeId) {
+    $preservedVolumeIds += $preferredVolumeId
+}
 $pod = $null
 $volume = $null
 $errors = @()
 foreach ($opt in $candidates) {
     try {
         Write-Host "Trying $($opt.Gpu) / $($opt.Dc) ($($opt.Memory) GB, `$$($opt.Price)/hr)..."
-        $volume = @($volumes.networkVolumes) |
-            Where-Object {
-                $_.name -eq "jarvis-data" -and
-                $_.dataCenter -eq $opt.Dc
-            } |
-            Select-Object -First 1
+        $volume = $null
+        if ($preferredVolumeId) {
+            $volume = @($volumes.networkVolumes) |
+                Where-Object { $_.id -eq $preferredVolumeId } |
+                Select-Object -First 1
+            if ($volume -and $volume.dataCenter -ne $opt.Dc) {
+                # Keep the preserved Network Volume; skip other data centers.
+                continue
+            }
+        }
         if (-not $volume) {
+            $volume = @($volumes.networkVolumes) |
+                Where-Object {
+                    $_.name -eq "jarvis-data" -and
+                    $_.dataCenter -eq $opt.Dc
+                } |
+                Select-Object -First 1
+        }
+        if (-not $volume) {
+            if ($preferredVolumeId) {
+                throw "Preferred Network Volume $preferredVolumeId is unavailable in $($opt.Dc)."
+            }
             $volume = Invoke-JsonApi `
                 -Method Post `
                 -Uri "$runpodBase/network-volumes" `
@@ -432,6 +479,7 @@ if ($pod.mounts.network) {
 foreach ($v in @($allVolumes.networkVolumes)) {
     if ($v.name -ne "jarvis-data") { continue }
     if ($v.id -in $mountedIds) { continue }
+    if ($v.id -in $preservedVolumeIds) { continue }
     try {
         Invoke-WebRequest `
             -Method Delete `
